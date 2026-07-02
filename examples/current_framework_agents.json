@@ -1,0 +1,266 @@
+{
+  "agents": [
+    {
+      "agent_ref": "SimpleRAGChatbot",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "rag_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"rag": true},
+        "rag": {"top_k": 5, "source": "local_knowledge_base", "external_write": true}
+      }
+    },
+    {
+      "agent_ref": "LangServe_RAG",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "rag_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"rag": true},
+        "rag": {"top_k": 4, "source": "langchain_retriever", "external_write": true}
+      }
+    },
+    {
+      "agent_ref": "LangGraph_Agents",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "rag_poisoning", "tool_output_injection", "planning_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"rag": true, "tool": true, "planning": true},
+        "rag": {"top_k": 5, "source": "graph_retriever", "external_write": true},
+        "planning": {"fields": ["plan", "evidence", "decision"]},
+        "tool_schemas": [{"name": "web_lookup", "description": "Search project docs", "inputSchema": {"query": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "RAG_with_LangChain_and_FastAPI",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "rag_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"rag": true},
+        "rag": {"top_k": 3, "source": "fastapi_vector_store", "external_write": true}
+      }
+    },
+    {
+      "agent_ref": "GPT_Researcher",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "rag_poisoning", "search_narrative_poisoning", "planning_poisoning", "tool_output_injection"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"rag": true, "search": true, "planning": true, "tool": true},
+        "rag": {"top_k": 6, "source": "research_corpus", "external_write": true},
+        "search": {"source_set": "open_web"},
+        "planning": {"fields": ["plan", "source_notes", "final_report"]},
+        "tool_schemas": [{"name": "web_search", "description": "Open web search", "inputSchema": {"query": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "PydanticAI_MCP",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "tool_output_injection", "mcp_description_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"tool": true, "mcp": true},
+        "tool_schemas": [{"name": "calculator", "description": "MCP calculator tool", "inputSchema": {"expression": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "AutoGen_MCP",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "tool_output_injection", "mcp_description_poisoning", "planning_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"tool": true, "mcp": true, "planning": true},
+        "planning": {"fields": ["plan", "tool_action", "final_answer"]},
+        "tool_schemas": [{"name": "file_summary", "description": "MCP file summary tool", "inputSchema": {"path": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "Langroid_MCP",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "tool_output_injection", "mcp_description_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"tool": true, "mcp": true},
+        "tool_schemas": [{"name": "email_helper", "description": "MCP email helper", "inputSchema": {"to": "string", "body": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "StrandsAgents_MCP",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "tool_output_injection", "mcp_description_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"tool": true, "mcp": true},
+        "tool_schemas": [{"name": "http_client", "description": "MCP HTTP client", "inputSchema": {"url": "string", "method": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "CrewAI_MCP",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "tool_output_injection", "mcp_description_poisoning", "multi_agent_communication_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"tool": true, "mcp": true, "multi_agent": true},
+        "multi_agent": {"roles": ["manager", "researcher", "executor"], "bus": "crew_messages"},
+        "tool_schemas": [{"name": "task_router", "description": "MCP task router", "inputSchema": {"task": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "Swarm_MCP",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "tool_output_injection", "mcp_description_poisoning", "multi_agent_communication_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"tool": true, "mcp": true, "multi_agent": true},
+        "multi_agent": {"roles": ["handoff_agent", "worker"], "bus": "function_call_handoff"},
+        "tool_schemas": [{"name": "handoff_tool", "description": "Swarm handoff function", "inputSchema": {"target": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "MetaGPT_Data_Interpreter",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "memory_poisoning", "planning_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"memory": true, "planning": true},
+        "memory": {"store": "sqlite_bm25_memory", "persistent": true},
+        "planning": {"fields": ["plan", "evidence", "decision"]}
+      }
+    },
+    {
+      "agent_ref": "MetaGPT_RAG_Analyst",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "rag_poisoning", "memory_poisoning", "planning_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"rag": true, "memory": true, "planning": true},
+        "rag": {"top_k": 5, "source": "metagpt_rag_store", "external_write": true},
+        "memory": {"store": "sqlite_bm25_memory", "persistent": true},
+        "planning": {"fields": ["plan", "evidence", "decision"]}
+      }
+    },
+    {
+      "agent_ref": "CI_Pipeline_Agent",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "memory_poisoning", "planning_poisoning", "tool_output_injection"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"memory": true, "planning": true, "tool": true},
+        "memory": {"store": "ci_history_memory", "persistent": true},
+        "planning": {"fields": ["plan", "tool_action", "decision"]},
+        "tool_schemas": [{"name": "ci_status", "description": "Read CI status", "inputSchema": {"run_id": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "Customer_Support_Agent",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "memory_poisoning", "tool_output_injection"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"memory": true, "tool": true},
+        "memory": {"store": "customer_session_memory", "persistent": true},
+        "tool_schemas": [{"name": "ticket_lookup", "description": "Read support ticket", "inputSchema": {"ticket_id": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "Code_Review_Agent",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "memory_poisoning", "planning_poisoning", "tool_output_injection"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"memory": true, "planning": true, "tool": true},
+        "memory": {"store": "review_history_memory", "persistent": true},
+        "planning": {"fields": ["plan", "evidence", "decision"]},
+        "tool_schemas": [{"name": "repo_search", "description": "Search repository", "inputSchema": {"query": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "AutoGen_MagenticOne",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "multi_agent_communication_poisoning", "planning_poisoning", "tool_output_injection"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"multi_agent": true, "planning": true, "tool": true},
+        "multi_agent": {"roles": ["orchestrator", "web_surfer", "file_surfer", "coder"], "bus": "autogen_messages"},
+        "planning": {"fields": ["plan", "agent_message", "decision"]},
+        "tool_schemas": [{"name": "file_reader", "description": "Read sandbox file", "inputSchema": {"path": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "CrewAI_Default",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "multi_agent_communication_poisoning", "planning_poisoning", "tool_output_injection"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"multi_agent": true, "planning": true, "tool": true},
+        "multi_agent": {"roles": ["manager", "researcher", "writer", "executor"], "bus": "crew_messages"},
+        "planning": {"fields": ["task_plan", "delegation", "result"]},
+        "tool_schemas": [{"name": "web_reader", "description": "Read web page", "inputSchema": {"url": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "MetaGPT_MultiAgent",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "multi_agent_communication_poisoning", "planning_poisoning", "memory_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"multi_agent": true, "planning": true, "memory": true},
+        "multi_agent": {"roles": ["product_manager", "architect", "engineer"], "bus": "metagpt_env"},
+        "memory": {"store": "team_memory", "persistent": true},
+        "planning": {"fields": ["plan", "task", "decision"]}
+      }
+    },
+    {
+      "agent_ref": "DefenseAgent_A_Chat",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection"],
+      "static_artifacts": {
+        "policy": "L1+L2 defense policy",
+        "capabilities": {}
+      }
+    },
+    {
+      "agent_ref": "DefenseAgent_B_Tool",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "tool_output_injection"],
+      "static_artifacts": {
+        "policy": "L1+L2+L4 defense policy",
+        "capabilities": {"tool": true},
+        "tool_schemas": [{"name": "safe_calculator", "description": "Calculator", "inputSchema": {"expression": "string"}}]
+      }
+    },
+    {
+      "agent_ref": "DefenseAgent_C_RAG",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "rag_poisoning"],
+      "static_artifacts": {
+        "policy": "L1+L2+L3 defense policy",
+        "capabilities": {"rag": true},
+        "rag": {"top_k": 4, "source": "defense_rag_store", "external_write": true}
+      }
+    },
+    {
+      "agent_ref": "DefenseAgent_D_RAGMemory",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "rag_poisoning", "memory_poisoning"],
+      "static_artifacts": {
+        "policy": "L1+L2+L3 defense policy",
+        "capabilities": {"rag": true, "memory": true},
+        "rag": {"top_k": 4, "source": "defense_rag_store", "external_write": true},
+        "memory": {"store": "defense_memory", "persistent": true}
+      }
+    },
+    {
+      "agent_ref": "DefenseAgent_E_Tool",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "tool_output_injection"],
+      "static_artifacts": {
+        "policy": "L1+L2+L4 defense policy",
+        "capabilities": {"tool": true},
+        "tool_schemas": [{"name": "audit_lookup", "description": "Lookup audit event", "inputSchema": {"event_id": "string"}}]
+      }
+    }
+  ]
+}

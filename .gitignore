@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments and local secrets
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Generated runs and local verification outputs
+runs/
+.tmp_tests/
+tmp_write_probe/
+py_write_probe/
+.agents/
+.codex/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

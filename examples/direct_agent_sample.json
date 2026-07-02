@@ -1,0 +1,20 @@
+{
+  "agent_ref": "direct_fake_agent",
+  "protocol": "python",
+  "request_template": {"message": "{{prompt}}"},
+  "python_callable": {
+    "module_path": "tests/fixtures/fake_direct_agent.py",
+    "callable": "handle",
+    "inspect": "inspect_agent"
+  },
+  "optional_artifacts": [
+    {
+      "kind": "readme_excerpt",
+      "text": "This demo agent uses RAG retrieval, session memory, tools, planning traces, and multi-agent roles."
+    }
+  ],
+  "sandbox_policy": {
+    "network": "disabled",
+    "side_effects": "mock_only"
+  }
+}
