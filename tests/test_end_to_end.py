@@ -135,6 +135,81 @@ class EndToEndTest(unittest.TestCase):
         serialized_cases = str([{"setup": case.setup, "trigger": case.trigger} for case in cases])
         self.assertIn("LLM_VARIANT", serialized_cases)
 
+    def test_tool1_siraj_enrichment_writes_seed_metadata(self) -> None:
+        descriptor = AgentAccessDescriptor.from_dict(
+            {
+                "agent_ref": "siraj_tool1_agent",
+                "protocol": "mock",
+                "static_artifacts": {
+                    "policy": "standard assistant policy",
+                    "capabilities": {"rag": True},
+                    "rag": {"top_k": 3, "source": "siraj_docs", "external_write": True},
+                },
+            }
+        )
+        analyzer = Tool1Analyzer(enable_llm_review=False)
+        analyzer.llm_client = _FakeSirajLLM()
+        _session, _snapshot, seeds = analyzer.analyze(descriptor, self._tmp_root())
+        enriched = [seed.score_detail.get("siraj", {}) for seed in seeds if seed.risk_domain == "rag_poisoning"]
+        self.assertTrue(enriched)
+        self.assertEqual(enriched[0]["risk_outcome"], "Retrieved sandbox document is treated as trusted context.")
+        self.assertEqual(enriched[0]["risk_source"], "environment")
+        self.assertTrue(enriched[0]["environment_adversarial"])
+        self.assertEqual(enriched[0]["generation_status"], "llm")
+
+    def test_tool2_siraj_prompt_generates_schema_valid_case(self) -> None:
+        descriptors = _load_descriptors("examples/current_framework_agents.json")
+        descriptor = next(item for item in descriptors if item.agent_ref == "SimpleRAGChatbot")
+        tmp = self._tmp_root()
+        _session, snapshot, seeds = Tool1Analyzer(enable_llm_review=False).analyze(descriptor, tmp)
+        generator = Tool2Generator(enable_llm_variants=True)
+        generator.llm_client = _FakeSirajLLM()
+        cases = generator.generate(snapshot, seeds, count=1, out_dir=tmp, use_siraj_prompts=True)
+        self.assertTrue(cases)
+        self.assertTrue(all(case.validation_result["schema_valid"] for case in cases))
+        self.assertTrue(all(case.provenance.get("prompt_style") == "siraj_case_generation_v1" for case in cases))
+        self.assertTrue(all(case.provenance["siraj_generation"]["red_team_strategies"] for case in cases))
+        self.assertIn("SIRAJ_CASE", str([case.trigger for case in cases]))
+
+    def test_tool2_siraj_prompt_without_llm_uses_deterministic_fallback(self) -> None:
+        descriptors = _load_descriptors("examples/current_framework_agents.json")
+        descriptor = next(item for item in descriptors if item.agent_ref == "SimpleRAGChatbot")
+        tmp = self._tmp_root()
+        _session, snapshot, seeds = Tool1Analyzer(enable_llm_review=False).analyze(descriptor, tmp)
+        cases = Tool2Generator(enable_llm_variants=False).generate(snapshot, seeds, count=1, out_dir=tmp, use_siraj_prompts=True)
+        self.assertTrue(cases)
+        self.assertTrue(all(case.validation_result["schema_valid"] for case in cases))
+        self.assertTrue(all(case.provenance["siraj_generation"]["enabled"] is False for case in cases))
+
+    def test_tool2_refinement_appends_cases_and_preserves_protected_fields(self) -> None:
+        descriptors = _load_descriptors("examples/current_framework_agents.json")
+        descriptor = next(item for item in descriptors if item.agent_ref == "SimpleRAGChatbot")
+        tmp = self._tmp_root()
+        _session, snapshot, seeds = Tool1Analyzer(enable_llm_review=False).analyze(descriptor, tmp)
+        base_case = Tool2Generator(enable_llm_variants=False).generate(snapshot, seeds, count=1)[0]
+        generator = Tool2Generator(enable_llm_variants=True)
+        generator.llm_client = _FakeSirajLLM()
+        all_cases = generator.refine_cases(
+            snapshot,
+            seeds,
+            [base_case],
+            [{"case_id": base_case.case_id, "failure_stage": "not_triggered", "metrics": {}, "feedback": {"note": "blocked"}}],
+            rounds=2,
+            out_dir=tmp,
+        )
+        self.assertEqual(len(all_cases), 3)
+        refined = all_cases[-1]
+        self.assertEqual(refined.seed_id, base_case.seed_id)
+        self.assertEqual(refined.attack_family, base_case.attack_family)
+        self.assertEqual(refined.delivery_mode, base_case.delivery_mode)
+        self.assertEqual(refined.executor, base_case.executor)
+        self.assertEqual(refined.expected_signal, base_case.expected_signal)
+        self.assertEqual(refined.cleanup, base_case.cleanup)
+        self.assertNotEqual(refined.trigger, base_case.trigger)
+        self.assertEqual(refined.provenance["mutation_strategy"], "siraj_refinement")
+        self.assertEqual(refined.provenance["refinement_round"], 2)
+        self.assertTrue((tmp / "generated_cases.json").exists())
+
     def test_executor_registry_falls_back_to_sandbox(self) -> None:
         case = GeneratedCase(
             case_id="case_missing_executor",
@@ -337,6 +412,41 @@ class _FakeVariantLLM:
         }
 
 
+class _FakeSirajLLM:
+    available = True
+    config = SimpleNamespace(model="fake-siraj")
+
+    def complete_json(self, _system_prompt: str, user_payload: dict) -> dict:
+        if user_payload.get("task", "").startswith("Generate SIRAJ-style fine-grained"):
+            return {
+                "seed_enrichments": [
+                    {
+                        "seed_id": item["seed_id"],
+                        "risk_domain": item["risk_domain"],
+                        "risk_outcome": "Retrieved sandbox document is treated as trusted context.",
+                        "risk_source": "environment",
+                        "expected_trajectory": ["retrieve_document", "append_retrieved_context", "generate_answer"],
+                        "environment_adversarial": True,
+                        "rationale": "RAG evidence supports environment-sourced retrieval risk.",
+                    }
+                    for item in user_payload["candidate_seeds"]
+                ]
+            }
+        skeleton = user_payload["case_skeleton"]
+        return {
+            "structured_reasoning": {
+                "understanding_test_case": "The case targets the existing sandbox marker outcome.",
+                "failure_or_diversity_analysis": "Use a different wording strategy while preserving schema.",
+                "strategy_selection": "adding_context",
+                "implementation_plan": "Rewrite setup and trigger strings only.",
+            },
+            "red_team_strategies": ["adding_context", "urgency"],
+            "setup": _mark_strings_with(skeleton["setup"], "SIRAJ_CASE"),
+            "trigger": _mark_strings_with(skeleton["trigger"], "SIRAJ_CASE"),
+            "rationale": "SIRAJ-style case generation.",
+        }
+
+
 def _mark_strings(value):
     if isinstance(value, str):
         return f"{value} LLM_VARIANT"
@@ -344,6 +454,16 @@ def _mark_strings(value):
         return [_mark_strings(item) for item in value]
     if isinstance(value, dict):
         return {key: _mark_strings(item) for key, item in value.items()}
+    return value
+
+
+def _mark_strings_with(value, marker):
+    if isinstance(value, str):
+        return f"{value} {marker}"
+    if isinstance(value, list):
+        return [_mark_strings_with(item, marker) for item in value]
+    if isinstance(value, dict):
+        return {key: _mark_strings_with(item, marker) for key, item in value.items()}
     return value
 
 

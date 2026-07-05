@@ -30,10 +30,17 @@ def main(argv: list[str] | None = None) -> int:
     generate.add_argument("--analysis-dir", required=True)
     generate.add_argument("--count", type=int, default=3)
     generate.add_argument("--profile", choices=["compact", "expanded"], default="compact")
+    generate.add_argument("--siraj-prompts", action="store_true", help="Use SIRAJ-style case generation prompts when LLM variants are enabled.")
     _add_llm_variant_flags(generate)
 
     run_cases = sub.add_parser("run-cases", help="Run deterministic sandbox execution for generated cases.")
     run_cases.add_argument("--analysis-dir", required=True)
+
+    refine = sub.add_parser("refine-cases", help="Append SIRAJ-style refinements for failed or low-quality cases.")
+    refine.add_argument("--analysis-dir", required=True)
+    refine.add_argument("--rounds", type=int, default=1)
+    refine.add_argument("--quality-threshold", type=float, default=0.80)
+    _add_llm_variant_flags(refine)
 
     feedback = sub.add_parser("apply-feedback", help="Update risk seed confidence from run_result.json.")
     feedback.add_argument("--analysis-dir", required=True)
@@ -83,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_generate(args)
     if args.command == "run-cases":
         return _cmd_run_cases(args)
+    if args.command == "refine-cases":
+        return _cmd_refine_cases(args)
     if args.command == "apply-feedback":
         return _cmd_apply_feedback(args)
     if args.command == "evaluate-tool12":
@@ -121,7 +130,14 @@ def _cmd_generate(args: argparse.Namespace) -> int:
     analysis_dir = Path(args.analysis_dir)
     snapshot = AgentSnapshot.from_dict(load_json(analysis_dir / "agent_snapshot.json"))
     seeds = [RiskSeed.from_dict(item) for item in load_json(analysis_dir / "risk_seeds.json")]
-    cases = Tool2Generator(enable_llm_variants=args.llm_variants).generate(snapshot, seeds, count=args.count, out_dir=analysis_dir, profile=args.profile)
+    cases = Tool2Generator(enable_llm_variants=args.llm_variants).generate(
+        snapshot,
+        seeds,
+        count=args.count,
+        out_dir=analysis_dir,
+        profile=args.profile,
+        use_siraj_prompts=args.siraj_prompts,
+    )
     print(f"generated {len(cases)} cases -> {analysis_dir / 'generated_cases.json'}")
     return 0
 
@@ -133,6 +149,25 @@ def _cmd_run_cases(args: argparse.Namespace) -> int:
     results = DEFAULT_EXECUTOR_REGISTRY.run(snapshot.analysis_id, cases)
     write_json(analysis_dir / "run_result.json", results)
     print(f"ran {len(results)} sandbox cases -> {analysis_dir / 'run_result.json'}")
+    return 0
+
+
+def _cmd_refine_cases(args: argparse.Namespace) -> int:
+    analysis_dir = Path(args.analysis_dir)
+    snapshot = AgentSnapshot.from_dict(load_json(analysis_dir / "agent_snapshot.json"))
+    seeds = [RiskSeed.from_dict(item) for item in load_json(analysis_dir / "risk_seeds.json")]
+    cases = [GeneratedCase.from_dict(item) for item in load_json(analysis_dir / "generated_cases.json")]
+    results = load_json(analysis_dir / "run_result.json")
+    refined = Tool2Generator(enable_llm_variants=args.llm_variants).refine_cases(
+        snapshot,
+        seeds,
+        cases,
+        results,
+        rounds=args.rounds,
+        out_dir=analysis_dir,
+        quality_threshold=args.quality_threshold,
+    )
+    print(f"refined cases total={len(refined)} appended={len(refined) - len(cases)} -> {analysis_dir / 'generated_cases.json'}")
     return 0
 
 
