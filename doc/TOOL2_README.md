@@ -11,22 +11,25 @@
 
 Tool2 的职责是把 Tool1 输出的 `RiskSeed[]` 和 `AgentSnapshot` 转成结构化 `GeneratedCase[]`。
 
-当前 Tool2 有三条主要路径：
+当前 Tool2 有两条主路径和一条兼容路径：
 
 ```text
-默认生成：
+SIRAJ 默认生成：
+  RiskSeed.score_detail["siraj"] + AgentSnapshot + previous_cases
+  -> 模板骨架
+  -> 上下文绑定
+  -> SIRAJ-style prompt 或确定性 SIRAJ fallback
+  -> 只改 setup / trigger
+  -> 记录 structured_reasoning / strategies / provenance
+  -> GeneratedCase
+
+legacy 生成：
   RiskSeed + AgentSnapshot
   -> 模板骨架
   -> 上下文绑定
-  -> 策略变体
+  -> 旧策略变体
+  -> 可选 legacy LLM variant
   -> 校验和评分
-  -> GeneratedCase
-
-SIRAJ 生成：
-  RiskSeed.score_detail["siraj"] + AgentSnapshot + previous_cases
-  -> SIRAJ-style prompt
-  -> 只改 setup / trigger
-  -> 记录 structured_reasoning / strategies / provenance
   -> GeneratedCase
 
 多轮 refinement：
@@ -43,7 +46,7 @@ agent_snapshot.json + risk_seeds.json
   -> Tool2Generator.generate()
   -> 模板骨架
   -> 绑定 Agent 上下文
-  -> 策略变体 / SIRAJ prompt 变体
+  -> SIRAJ prompt 变体或确定性 SIRAJ fallback
   -> schema + dry-run 校验
   -> quality_score
   -> generated_cases.json
@@ -66,10 +69,10 @@ CLI 入口是：
 python -m agenteval.cli generate-cases --analysis-dir runs/simple_rag --count 3
 ```
 
-启用 SIRAJ prompt：
+这条命令默认就走 SIRAJ case generation 路径。显式回到旧模板路径时才需要：
 
 ```powershell
-python -m agenteval.cli generate-cases --analysis-dir runs/simple_rag --count 3 --siraj-prompts --llm-variants
+python -m agenteval.cli generate-cases --analysis-dir runs/simple_rag --count 3 --legacy-prompts
 ```
 
 ### 2.1 AgentSnapshot 输入
@@ -190,26 +193,27 @@ Tool2 输出 `generated_cases.json`，其中每条记录是 `GeneratedCase`。
 
 ## 4. CLI 入口和参数
 
-### 4.1 默认生成
+### 4.1 默认 SIRAJ 生成
 
 ```powershell
 python -m agenteval.cli generate-cases --analysis-dir runs/simple_rag --count 3
 ```
 
-默认使用模板路径，不启用 SIRAJ prompt。
+默认使用 `_generate_one_siraj()`。它仍然先用模板生成安全骨架，再用 SIRAJ-style prompt 改写 `setup` / `trigger`；没有 `DEEPSEEK_API_KEY` 时会走确定性 SIRAJ fallback。
 
-### 4.2 SIRAJ prompt 生成
+### 4.2 legacy 模板路径
 
 ```powershell
-python -m agenteval.cli generate-cases --analysis-dir runs/simple_rag --count 3 --siraj-prompts --llm-variants
+python -m agenteval.cli generate-cases --analysis-dir runs/simple_rag --count 3 --legacy-prompts --llm-variants
 ```
 
 参数说明：
 
-- `--siraj-prompts`：启用 SIRAJ-style case generation prompt。
-- `--llm-variants`：允许 LLM 改写 `setup` / `trigger`。
+- `--siraj-prompts`：兼容开关，显式声明使用默认 SIRAJ 路径。
+- `--legacy-prompts`：回到旧 `_generate_one()` 模板路径。
+- `--llm-variants`：允许对应路径里的 LLM 改写 `setup` / `trigger`。
 
-如果没有 `DEEPSEEK_API_KEY`，即使开启 `--siraj-prompts`，也会走确定性 fallback，不中断流程。
+如果没有 `DEEPSEEK_API_KEY`，SIRAJ 默认路径会走确定性 fallback，不中断流程。
 
 ### 4.3 多轮 refinement
 
@@ -234,8 +238,8 @@ seeds
   -> 跳过 status == candidate 的 seed
   -> 为每个 seed 生成 variants
   -> 每个 variant 选择一个 mutation strategy
-  -> 默认路径 _generate_one()
-     或 SIRAJ 路径 _generate_one_siraj()
+  -> 默认 SIRAJ 路径 _generate_one_siraj()
+     或 legacy 路径 _generate_one()
   -> 写 generated_cases.json
 ```
 
@@ -378,9 +382,9 @@ AGENTEVAL_SANDBOX_MARKER
 }
 ```
 
-## 9. 默认生成路径
+## 9. legacy 生成路径
 
-默认路径是 `_generate_one()`。
+legacy 路径是 `_generate_one()`，只有显式传入 `--legacy-prompts` 或 `use_siraj_prompts=False` 时才会使用。
 
 数据流：
 
@@ -413,7 +417,7 @@ multi_turn_split
 - `format_embedding`：加 JSON envelope 和 marker field。
 - `multi_turn_split`：把触发拆成两个 turn。
 
-默认路径的 provenance 示例：
+legacy 路径的 provenance 示例：
 
 ```json
 {
@@ -431,9 +435,9 @@ multi_turn_split
 }
 ```
 
-## 10. 默认 LLM variant
+## 10. legacy LLM variant
 
-默认路径中的 `_apply_llm_variant()` 只允许 LLM 改写：
+legacy 路径中的 `_apply_llm_variant()` 只允许 LLM 改写：
 
 ```text
 setup
@@ -462,7 +466,7 @@ trigger
 
 ## 11. SIRAJ case generation 路径
 
-启用 `--siraj-prompts` 后走 `_generate_one_siraj()`。
+默认走 `_generate_one_siraj()`；`--siraj-prompts` 只是显式声明默认行为。只有使用 `--legacy-prompts` 时才会绕过这条路径。
 
 它前半段仍然先用模板生成安全骨架：
 
@@ -973,6 +977,6 @@ Tool2 当前不做：
 
 ```text
 把 Tool1 的 evidence-bound RiskSeed 转成结构化、安全可校验的 GeneratedCase；
-在 SIRAJ 模式下，进一步利用 risk_outcome / risk_source / expected_trajectory 做更有目标和多样性的 case 生成；
+默认利用 SIRAJ 的 risk_outcome / risk_source / expected_trajectory 做更有目标和多样性的 case 生成；
 执行后再根据 run_result 的 failure trajectory 追加多轮 refinement case。
 ```

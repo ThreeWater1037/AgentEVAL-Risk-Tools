@@ -30,6 +30,8 @@ def create_app(run_root: str | Path = "runs/api_sessions"):
         descriptor = AgentAccessDescriptor.from_dict(descriptor_payload)
         analyzer = Tool1Analyzer(
             enable_dynamic_probe=bool(payload.get("enable_dynamic_probe", True)),
+            enable_llm_evidence=payload.get("llm_evidence"),
+            enable_llm_runtime_events=payload.get("llm_runtime_events"),
             enable_llm_review=payload.get("llm_review"),
         )
         session, snapshot, seeds = analyzer.analyze(descriptor)
@@ -73,6 +75,7 @@ def create_app(run_root: str | Path = "runs/api_sessions"):
             strategies=payload.get("strategies"),
             out_dir=analysis_dir,
             profile=str(payload.get("profile", "compact")),
+            use_siraj_prompts=bool(payload.get("siraj_prompts", True)) and not bool(payload.get("legacy_prompts", False)),
         )
         job = {
             "job_id": f"generation_{analysis_id}",

@@ -24,13 +24,15 @@ def main(argv: list[str] | None = None) -> int:
     analyze.add_argument("--agent")
     analyze.add_argument("--out", required=True)
     analyze.add_argument("--no-dynamic-probe", action="store_true")
+    _add_llm_evidence_flags(analyze)
+    _add_llm_runtime_event_flags(analyze)
     _add_llm_review_flags(analyze)
 
     generate = sub.add_parser("generate-cases", help="Run Tool2 for one analysis directory.")
     generate.add_argument("--analysis-dir", required=True)
     generate.add_argument("--count", type=int, default=3)
     generate.add_argument("--profile", choices=["compact", "expanded"], default="compact")
-    generate.add_argument("--siraj-prompts", action="store_true", help="Use SIRAJ-style case generation prompts when LLM variants are enabled.")
+    _add_case_prompt_flags(generate)
     _add_llm_variant_flags(generate)
 
     run_cases = sub.add_parser("run-cases", help="Run deterministic sandbox execution for generated cases.")
@@ -53,6 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("--profile", choices=["compact", "expanded"], default="compact")
     evaluate.add_argument("--include-direct-llm", action="store_true")
     evaluate.add_argument("--random-seed", type=int, default=13)
+    _add_case_prompt_flags(evaluate)
+    _add_llm_evidence_flags(evaluate)
+    _add_llm_runtime_event_flags(evaluate)
     _add_llm_review_flags(evaluate)
     _add_llm_variant_flags(evaluate)
 
@@ -65,6 +70,9 @@ def main(argv: list[str] | None = None) -> int:
     demo.add_argument("--out", required=True)
     demo.add_argument("--count", type=int, default=3)
     demo.add_argument("--profile", choices=["compact", "expanded"], default="compact")
+    _add_case_prompt_flags(demo)
+    _add_llm_evidence_flags(demo)
+    _add_llm_runtime_event_flags(demo)
     _add_llm_review_flags(demo)
     _add_llm_variant_flags(demo)
 
@@ -73,6 +81,9 @@ def main(argv: list[str] | None = None) -> int:
     manifest.add_argument("--out", required=True)
     manifest.add_argument("--count", type=int, default=3)
     manifest.add_argument("--profile", choices=["compact", "expanded"], default="compact")
+    _add_case_prompt_flags(manifest)
+    _add_llm_evidence_flags(manifest)
+    _add_llm_runtime_event_flags(manifest)
     _add_llm_review_flags(manifest)
     _add_llm_variant_flags(manifest)
 
@@ -117,7 +128,12 @@ def main(argv: list[str] | None = None) -> int:
 def _cmd_analyze(args: argparse.Namespace) -> int:
     descriptors = _load_descriptors(args.descriptor)
     selected = _select_descriptors(descriptors, args.agent)
-    analyzer = Tool1Analyzer(enable_dynamic_probe=not args.no_dynamic_probe, enable_llm_review=args.llm_review)
+    analyzer = Tool1Analyzer(
+        enable_dynamic_probe=not args.no_dynamic_probe,
+        enable_llm_evidence=args.llm_evidence,
+        enable_llm_runtime_events=args.llm_runtime_events,
+        enable_llm_review=args.llm_review,
+    )
     out = ensure_dir(args.out)
     for descriptor in selected:
         target = out if len(selected) == 1 else out / _safe_name(descriptor.agent_ref)
@@ -186,8 +202,11 @@ def _cmd_evaluate_tool12(args: argparse.Namespace) -> int:
         labels=labels,
         count=args.count,
         profile=args.profile,
+        enable_llm_evidence=args.llm_evidence,
+        enable_llm_runtime_events=args.llm_runtime_events,
         enable_llm_review=args.llm_review,
         enable_llm_variants=args.llm_variants,
+        use_siraj_prompts=args.siraj_prompts,
         include_direct_llm=args.include_direct_llm,
         random_seed=args.random_seed,
     )
@@ -207,14 +226,19 @@ def _cmd_import_paper_results(args: argparse.Namespace) -> int:
 def _cmd_run_demo(args: argparse.Namespace) -> int:
     descriptors = _load_descriptors(args.descriptors)
     root = ensure_dir(args.out)
-    analyzer = Tool1Analyzer(enable_dynamic_probe=True, enable_llm_review=args.llm_review)
+    analyzer = Tool1Analyzer(
+        enable_dynamic_probe=True,
+        enable_llm_evidence=args.llm_evidence,
+        enable_llm_runtime_events=args.llm_runtime_events,
+        enable_llm_review=args.llm_review,
+    )
     generator = Tool2Generator(enable_llm_variants=args.llm_variants)
     per_agent_expected = []
 
     for descriptor in descriptors:
         agent_dir = ensure_dir(root / _safe_name(descriptor.agent_ref))
         session, snapshot, seeds = analyzer.analyze(descriptor, agent_dir)
-        cases = generator.generate(snapshot, seeds, count=args.count, out_dir=agent_dir, profile=args.profile)
+        cases = generator.generate(snapshot, seeds, count=args.count, out_dir=agent_dir, profile=args.profile, use_siraj_prompts=args.siraj_prompts)
         results = DEFAULT_EXECUTOR_REGISTRY.run(session.analysis_id, cases)
         write_json(agent_dir / "run_result.json", results)
         detected_domains = {seed.risk_domain for seed in seeds}
@@ -242,13 +266,18 @@ def _cmd_run_demo(args: argparse.Namespace) -> int:
 def _cmd_run_manifest(args: argparse.Namespace) -> int:
     descriptors = load_target_descriptors(args.manifest)
     root = ensure_dir(args.out)
-    analyzer = Tool1Analyzer(enable_dynamic_probe=True, enable_llm_review=args.llm_review)
+    analyzer = Tool1Analyzer(
+        enable_dynamic_probe=True,
+        enable_llm_evidence=args.llm_evidence,
+        enable_llm_runtime_events=args.llm_runtime_events,
+        enable_llm_review=args.llm_review,
+    )
     generator = Tool2Generator(enable_llm_variants=args.llm_variants)
     per_agent_expected = []
     for descriptor in descriptors:
         agent_dir = ensure_dir(root / _safe_name(descriptor.agent_ref))
         session, snapshot, seeds = analyzer.analyze(descriptor, agent_dir)
-        cases = generator.generate(snapshot, seeds, count=args.count, out_dir=agent_dir, profile=args.profile)
+        cases = generator.generate(snapshot, seeds, count=args.count, out_dir=agent_dir, profile=args.profile, use_siraj_prompts=args.siraj_prompts)
         results = DEFAULT_EXECUTOR_REGISTRY.run(session.analysis_id, cases)
         write_json(agent_dir / "run_result.json", results)
         detected_domains = {seed.risk_domain for seed in seeds}
@@ -299,6 +328,61 @@ def _add_llm_review_flags(parser: argparse.ArgumentParser) -> None:
         dest="llm_review",
         action="store_false",
         help="Disable Tool1 LLM review even when DEEPSEEK_API_KEY is set.",
+    )
+
+
+def _add_case_prompt_flags(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--siraj-prompts",
+        dest="siraj_prompts",
+        action="store_true",
+        default=True,
+        help="Use SIRAJ-style Tool2 case prompts. This is the default path.",
+    )
+    group.add_argument(
+        "--legacy-prompts",
+        dest="siraj_prompts",
+        action="store_false",
+        help="Use the legacy Tool2 template path without SIRAJ case prompts.",
+    )
+
+
+def _add_llm_evidence_flags(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--llm-evidence",
+        "--enable-llm-evidence",
+        dest="llm_evidence",
+        action="store_true",
+        default=None,
+        help="Enable DeepSeek semantic evidence extraction for Tool1 text artifacts.",
+    )
+    group.add_argument(
+        "--no-llm-evidence",
+        "--disable-llm-evidence",
+        dest="llm_evidence",
+        action="store_false",
+        help="Disable Tool1 semantic evidence extraction even when DEEPSEEK_API_KEY is set.",
+    )
+
+
+def _add_llm_runtime_event_flags(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--llm-runtime-events",
+        "--enable-llm-runtime-events",
+        dest="llm_runtime_events",
+        action="store_true",
+        default=None,
+        help="Enable DeepSeek runtime event induction from Tool1 probe responses.",
+    )
+    group.add_argument(
+        "--no-llm-runtime-events",
+        "--disable-llm-runtime-events",
+        dest="llm_runtime_events",
+        action="store_false",
+        help="Disable Tool1 runtime event induction even when DEEPSEEK_API_KEY is set.",
     )
 
 

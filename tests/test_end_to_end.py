@@ -122,6 +122,55 @@ class EndToEndTest(unittest.TestCase):
         self.assertTrue(all(seed.seed_id.startswith("seed_") for seed in seeds))
         self.assertIn("fake-deepseek", {seed.score_detail.get("llm_review", {}).get("model") for seed in reviewed})
 
+    def test_tool1_llm_semantic_evidence_extracts_text_artifact_features(self) -> None:
+        descriptor = AgentAccessDescriptor.from_dict(
+            {
+                "agent_ref": "semantic_evidence_agent",
+                "protocol": "mock",
+                "optional_artifacts": [
+                    {
+                        "kind": "readme_excerpt",
+                        "text": "Customer-provided passages are inserted verbatim beside the task request before answer synthesis.",
+                    }
+                ],
+            }
+        )
+        analyzer = Tool1Analyzer(enable_llm_evidence=True, enable_llm_review=False, enable_siraj_enrichment=False)
+        analyzer.llm_client = _FakeSemanticEvidenceLLM()
+        _session, snapshot, seeds = analyzer.analyze(descriptor, self._tmp_root())
+        semantic = [item for item in snapshot.evidence_index if item.source_type == "artifact_semantic"]
+        self.assertTrue(semantic)
+        self.assertIn("external_context", {item.feature for item in semantic})
+        self.assertIn("prompt_context_injection", {seed.risk_domain for seed in seeds})
+        self.assertEqual(semantic[0].confidence, 0.7)
+
+    def test_tool1_llm_runtime_events_extract_response_events(self) -> None:
+        descriptor = AgentAccessDescriptor.from_dict(
+            {
+                "agent_ref": "runtime_event_agent",
+                "protocol": "python",
+                "request_template": {"message": "{{prompt}}"},
+                "python_callable": {
+                    "module_path": "tests/fixtures/fake_text_runtime_agent.py",
+                    "callable": "handle",
+                    "inspect": "inspect_agent",
+                },
+            }
+        )
+        analyzer = Tool1Analyzer(
+            enable_llm_runtime_events=True,
+            enable_llm_review=False,
+            enable_siraj_enrichment=False,
+        )
+        analyzer.llm_client = _FakeRuntimeEventLLM()
+        _session, snapshot, seeds = analyzer.analyze(descriptor, self._tmp_root())
+        runtime = [item for item in snapshot.evidence_index if item.feature == "runtime_search_result"]
+        self.assertTrue(runtime)
+        self.assertTrue(all(item.confidence == 0.7 for item in runtime))
+        self.assertTrue(any(obs.get("llm_runtime_events", {}).get("added") for obs in snapshot.runtime_observations))
+        search_seed = next(seed for seed in seeds if seed.risk_domain == "search_narrative_poisoning")
+        self.assertGreaterEqual(search_seed.score_detail["dynamic_score"], 1.0)
+
     def test_tool2_llm_variant_only_rewrites_case_text(self) -> None:
         descriptors = _load_descriptors("examples/current_framework_agents.json")
         descriptor = next(item for item in descriptors if item.agent_ref == "SimpleRAGChatbot")
@@ -129,7 +178,7 @@ class EndToEndTest(unittest.TestCase):
         _session, snapshot, seeds = Tool1Analyzer(enable_llm_review=False).analyze(descriptor, tmp)
         generator = Tool2Generator(enable_llm_variants=True)
         generator.llm_client = _FakeVariantLLM()
-        cases = generator.generate(snapshot, seeds, count=1, out_dir=tmp)
+        cases = generator.generate(snapshot, seeds, count=1, out_dir=tmp, use_siraj_prompts=False)
         self.assertTrue(cases)
         self.assertTrue(all(case.provenance["llm_variant"]["status"] == "ok" for case in cases))
         serialized_cases = str([{"setup": case.setup, "trigger": case.trigger} for case in cases])
@@ -164,7 +213,7 @@ class EndToEndTest(unittest.TestCase):
         _session, snapshot, seeds = Tool1Analyzer(enable_llm_review=False).analyze(descriptor, tmp)
         generator = Tool2Generator(enable_llm_variants=True)
         generator.llm_client = _FakeSirajLLM()
-        cases = generator.generate(snapshot, seeds, count=1, out_dir=tmp, use_siraj_prompts=True)
+        cases = generator.generate(snapshot, seeds, count=1, out_dir=tmp)
         self.assertTrue(cases)
         self.assertTrue(all(case.validation_result["schema_valid"] for case in cases))
         self.assertTrue(all(case.provenance.get("prompt_style") == "siraj_case_generation_v1" for case in cases))
@@ -176,7 +225,7 @@ class EndToEndTest(unittest.TestCase):
         descriptor = next(item for item in descriptors if item.agent_ref == "SimpleRAGChatbot")
         tmp = self._tmp_root()
         _session, snapshot, seeds = Tool1Analyzer(enable_llm_review=False).analyze(descriptor, tmp)
-        cases = Tool2Generator(enable_llm_variants=False).generate(snapshot, seeds, count=1, out_dir=tmp, use_siraj_prompts=True)
+        cases = Tool2Generator(enable_llm_variants=False).generate(snapshot, seeds, count=1, out_dir=tmp)
         self.assertTrue(cases)
         self.assertTrue(all(case.validation_result["schema_valid"] for case in cases))
         self.assertTrue(all(case.provenance["siraj_generation"]["enabled"] is False for case in cases))
@@ -397,6 +446,61 @@ class _FakeReviewLLM:
                 for item in user_payload["candidate_seeds"]
             ]
         }
+
+
+class _FakeSemanticEvidenceLLM:
+    available = True
+    config = SimpleNamespace(model="fake-semantic")
+
+    def complete_json(self, system_prompt: str, user_payload: dict) -> dict:
+        self.assert_protocol_shape(system_prompt, user_payload)
+        return {
+            "semantic_evidence": [
+                {
+                    "feature": "external_context",
+                    "semantic_category": "boundary",
+                    "supporting_excerpt": "Customer-provided passages are inserted verbatim beside the task request",
+                    "confidence": 0.82,
+                    "detail": "The artifact says externally supplied passages are placed beside the task request.",
+                }
+            ]
+        }
+
+    @staticmethod
+    def assert_protocol_shape(system_prompt: str, user_payload: dict) -> None:
+        if "Semantic Evidence Compiler" not in system_prompt:
+            raise AssertionError("semantic evidence prompt missing compiler role")
+        if user_payload.get("paper_protocol_name") != "Ontology-Grounded Semantic Evidence Extraction":
+            raise AssertionError("semantic evidence payload missing protocol name")
+        if "external_context" not in user_payload.get("allowed_features", []):
+            raise AssertionError("semantic evidence payload missing feature ontology")
+
+
+class _FakeRuntimeEventLLM:
+    available = True
+    config = SimpleNamespace(model="fake-runtime")
+
+    def complete_json(self, system_prompt: str, user_payload: dict) -> dict:
+        self.assert_protocol_shape(system_prompt, user_payload)
+        return {
+            "runtime_events": [
+                {
+                    "event_type": "search_result",
+                    "supporting_excerpt": "Search results show alpha.example ranked first",
+                    "confidence": 0.91,
+                    "reason": "The response exposes ranked search results.",
+                }
+            ]
+        }
+
+    @staticmethod
+    def assert_protocol_shape(system_prompt: str, user_payload: dict) -> None:
+        if "Runtime Trace Event Inducer" not in system_prompt:
+            raise AssertionError("runtime event prompt missing inducer role")
+        if user_payload.get("paper_protocol_name") != "Evidence-Bound Runtime Event Induction":
+            raise AssertionError("runtime event payload missing protocol name")
+        if "search_result" not in user_payload.get("allowed_event_types", []):
+            raise AssertionError("runtime event payload missing event ontology")
 
 
 class _FakeVariantLLM:
