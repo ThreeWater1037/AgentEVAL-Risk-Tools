@@ -1,0 +1,12 @@
+services:
+  agenteval-api:
+    build: .
+    image: agenteval-risk-tools:latest
+    ports:
+      - "8000:8000"
+    environment:
+      PYTHONPATH: /app/src
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    volumes:
+      - ./runs:/app/runs
+    command: ["uvicorn", "agenteval.api:app", "--host", "0.0.0.0", "--port", "8000"]
