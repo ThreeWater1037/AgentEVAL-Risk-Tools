@@ -255,45 +255,7 @@ def _cmd_run_demo(args: argparse.Namespace) -> int:
     descriptors = _load_descriptors(args.descriptors)
     root = ensure_dir(args.out)
     print(f"【CLI】开始demo全链路：agents={len(descriptors)}，输出目录={root}，count={args.count}，profile={args.profile}")
-    analyzer = Tool1Analyzer(
-        enable_dynamic_probe=True,
-        enable_llm_evidence=args.llm_evidence,
-        enable_llm_runtime_events=args.llm_runtime_events,
-        enable_llm_review=args.llm_review,
-    )
-    generator = Tool2Generator(enable_llm_variants=args.llm_variants)
-    per_agent_expected = []
-
-    for descriptor in descriptors:
-        agent_dir = ensure_dir(root / _safe_name(descriptor.agent_ref))
-        print(f"【Demo】开始处理Agent：{descriptor.agent_ref}")
-        session, snapshot, seeds = analyzer.analyze(descriptor, agent_dir)
-        print(f"【Tool1】完成：agent={descriptor.agent_ref}，seeds={len(seeds)}，evidence={len(snapshot.evidence_index)}")
-        cases = generator.generate(snapshot, seeds, count=args.count, out_dir=agent_dir, profile=args.profile, use_siraj_prompts=args.siraj_prompts)
-        print(f"【Tool2】完成：agent={descriptor.agent_ref}，cases={len(cases)}")
-        results = DEFAULT_EXECUTOR_REGISTRY.run(session.analysis_id, cases)
-        write_json(agent_dir / "run_result.json", results)
-        print(f"【执行器】完成：agent={descriptor.agent_ref}，results={len(results)}")
-        detected_domains = {seed.risk_domain for seed in seeds}
-        expected_domains = set(descriptor.expected_domains)
-        hits = detected_domains & expected_domains
-        per_agent_expected.append(
-            {
-                "agent_ref": descriptor.agent_ref,
-                "expected_domains": sorted(expected_domains),
-                "detected_domains": sorted(detected_domains),
-                "hits": sorted(hits),
-                "precision_proxy": round(len(hits) / max(1, len(detected_domains)), 3),
-                "recall_proxy": round(len(hits) / max(1, len(expected_domains)), 3),
-            }
-        )
-        print(f"【Demo】Agent处理完成：{descriptor.agent_ref}，seeds={len(seeds)}，cases={len(cases)}，results={len(results)}")
-
-    summary = summarize_run_root(root)
-    _augment_expected_summary(summary, per_agent_expected)
-    write_json(root / "summary.json", summary)
-    print(_brief_summary(summary))
-    return 0
+    return _run_descriptor_flow(descriptors, root, args, "Demo", "Agent", "agent")
 
 
 def _cmd_run_manifest(args: argparse.Namespace) -> int:
@@ -301,6 +263,18 @@ def _cmd_run_manifest(args: argparse.Namespace) -> int:
     descriptors = load_target_descriptors(args.manifest)
     root = ensure_dir(args.out)
     print(f"【CLI】开始manifest全链路：targets={len(descriptors)}，manifest={args.manifest}，输出目录={root}")
+    return _run_descriptor_flow(descriptors, root, args, "Manifest", "目标", "target")
+
+
+def _run_descriptor_flow(
+    descriptors: list[AgentAccessDescriptor],
+    root: Path,
+    args: argparse.Namespace,
+    stage_label: str,
+    item_label: str,
+    field_label: str,
+) -> int:
+    """复用 demo/manifest 的全链路编排，保持两者原有输出语义。"""
     analyzer = Tool1Analyzer(
         enable_dynamic_probe=True,
         enable_llm_evidence=args.llm_evidence,
@@ -311,33 +285,36 @@ def _cmd_run_manifest(args: argparse.Namespace) -> int:
     per_agent_expected = []
     for descriptor in descriptors:
         agent_dir = ensure_dir(root / _safe_name(descriptor.agent_ref))
-        print(f"【Manifest】开始处理目标：{descriptor.agent_ref}")
+        print(f"【{stage_label}】开始处理{item_label}：{descriptor.agent_ref}")
         session, snapshot, seeds = analyzer.analyze(descriptor, agent_dir)
-        print(f"【Tool1】完成：target={descriptor.agent_ref}，seeds={len(seeds)}，evidence={len(snapshot.evidence_index)}")
+        print(f"【Tool1】完成：{field_label}={descriptor.agent_ref}，seeds={len(seeds)}，evidence={len(snapshot.evidence_index)}")
         cases = generator.generate(snapshot, seeds, count=args.count, out_dir=agent_dir, profile=args.profile, use_siraj_prompts=args.siraj_prompts)
-        print(f"【Tool2】完成：target={descriptor.agent_ref}，cases={len(cases)}")
+        print(f"【Tool2】完成：{field_label}={descriptor.agent_ref}，cases={len(cases)}")
         results = DEFAULT_EXECUTOR_REGISTRY.run(session.analysis_id, cases)
         write_json(agent_dir / "run_result.json", results)
-        print(f"【执行器】完成：target={descriptor.agent_ref}，results={len(results)}")
-        detected_domains = {seed.risk_domain for seed in seeds}
-        expected_domains = set(descriptor.expected_domains)
-        hits = detected_domains & expected_domains
-        per_agent_expected.append(
-            {
-                "agent_ref": descriptor.agent_ref,
-                "expected_domains": sorted(expected_domains),
-                "detected_domains": sorted(detected_domains),
-                "hits": sorted(hits),
-                "precision_proxy": round(len(hits) / max(1, len(detected_domains)), 3),
-                "recall_proxy": round(len(hits) / max(1, len(expected_domains)), 3),
-            }
-        )
-        print(f"【Manifest】目标处理完成：{descriptor.agent_ref}，seeds={len(seeds)}，cases={len(cases)}，results={len(results)}")
+        print(f"【执行器】完成：{field_label}={descriptor.agent_ref}，results={len(results)}")
+        per_agent_expected.append(_expected_eval_row(descriptor, seeds))
+        print(f"【{stage_label}】{item_label}处理完成：{descriptor.agent_ref}，seeds={len(seeds)}，cases={len(cases)}，results={len(results)}")
     summary = summarize_run_root(root)
     _augment_expected_summary(summary, per_agent_expected)
     write_json(root / "summary.json", summary)
     print(_brief_summary(summary))
     return 0
+
+
+def _expected_eval_row(descriptor: AgentAccessDescriptor, seeds: list[RiskSeed]) -> dict:
+    """计算 demo/manifest 共用的 expected_domains 命中摘要。"""
+    detected_domains = {seed.risk_domain for seed in seeds}
+    expected_domains = set(descriptor.expected_domains)
+    hits = detected_domains & expected_domains
+    return {
+        "agent_ref": descriptor.agent_ref,
+        "expected_domains": sorted(expected_domains),
+        "detected_domains": sorted(detected_domains),
+        "hits": sorted(hits),
+        "precision_proxy": round(len(hits) / max(1, len(detected_domains)), 3),
+        "recall_proxy": round(len(hits) / max(1, len(expected_domains)), 3),
+    }
 
 
 def _load_descriptors(path: str | Path) -> list[AgentAccessDescriptor]:

@@ -12,6 +12,7 @@ import json
 import random
 import time
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -50,6 +51,23 @@ EXECUTOR_BY_DOMAIN = {
     "multi_agent_communication_poisoning": "multi_agent_runner",
     "search_narrative_poisoning": "search_rag_runner",
 }
+
+
+@dataclass(frozen=True)
+class AblationScenario:
+    """单个消融配置，替代长 tuple，降低字段顺序误读风险。"""
+
+    method: str
+    descriptor: AgentAccessDescriptor
+    dynamic: bool
+    llm_evidence: bool | None
+    llm_runtime_events: bool | None
+    llm_review: bool | None
+    llm_variants: bool | None
+    siraj_prompts: bool
+    generic_context: bool = False
+    ignore_dry_run: bool = False
+    feedback: bool = True
 
 
 def evaluate_tool12(
@@ -572,50 +590,96 @@ def _evaluate_ablations(
 ) -> list[dict[str, Any]]:
     """逐项关闭静态解析、动态 probe、语义证据、SIRAJ 等模块做消融。"""
     rows: list[dict[str, Any]] = []
-    scenarios = [
-        ("ours_full", descriptor, True, enable_llm_evidence, enable_llm_runtime_events, enable_llm_review, enable_llm_variants, use_siraj_prompts, False, False, True),
-        ("w/o_static_parsing", _without_optional_artifacts(descriptor), True, enable_llm_evidence, enable_llm_runtime_events, enable_llm_review, enable_llm_variants, use_siraj_prompts, False, False, True),
-        ("w/o_dynamic_probe", descriptor, False, enable_llm_evidence, enable_llm_runtime_events, enable_llm_review, enable_llm_variants, use_siraj_prompts, False, False, True),
-        ("w/o_semantic_evidence", descriptor, True, False, enable_llm_runtime_events, enable_llm_review, enable_llm_variants, use_siraj_prompts, False, False, True),
-        ("w/o_runtime_event_induction", descriptor, True, enable_llm_evidence, False, enable_llm_review, enable_llm_variants, use_siraj_prompts, False, False, True),
-        ("w/o_llm_review", descriptor, True, enable_llm_evidence, enable_llm_runtime_events, False, enable_llm_variants, use_siraj_prompts, False, False, True),
-        ("w/o_siraj_prompts", descriptor, True, enable_llm_evidence, enable_llm_runtime_events, enable_llm_review, enable_llm_variants, False, False, False, True),
-        ("w/o_context_binding", descriptor, True, enable_llm_evidence, enable_llm_runtime_events, enable_llm_review, enable_llm_variants, use_siraj_prompts, True, False, True),
-        ("w/o_dry_run", descriptor, True, enable_llm_evidence, enable_llm_runtime_events, enable_llm_review, enable_llm_variants, use_siraj_prompts, False, True, True),
-        ("w/o_feedback", descriptor, True, enable_llm_evidence, enable_llm_runtime_events, enable_llm_review, enable_llm_variants, use_siraj_prompts, False, False, False),
-    ]
-    for method, scenario_descriptor, dynamic, llm_evidence, llm_runtime_events, llm_review, llm_variants, scenario_siraj_prompts, generic_context, ignore_dry_run, feedback in scenarios:
-        agent_dir = ensure_dir(out_root / method.replace("/", "_") / _safe_name(descriptor.agent_ref))
+    for scenario in _ablation_scenarios(
+        descriptor,
+        enable_llm_evidence,
+        enable_llm_runtime_events,
+        enable_llm_review,
+        enable_llm_variants,
+        use_siraj_prompts,
+    ):
+        agent_dir = ensure_dir(out_root / scenario.method.replace("/", "_") / _safe_name(descriptor.agent_ref))
         analyzer = Tool1Analyzer(
-            enable_dynamic_probe=dynamic,
-            enable_llm_evidence=llm_evidence,
-            enable_llm_runtime_events=llm_runtime_events,
-            enable_llm_review=llm_review,
+            enable_dynamic_probe=scenario.dynamic,
+            enable_llm_evidence=scenario.llm_evidence,
+            enable_llm_runtime_events=scenario.llm_runtime_events,
+            enable_llm_review=scenario.llm_review,
         )
         start = time.perf_counter()
-        session, snapshot, seeds = analyzer.analyze(scenario_descriptor, agent_dir)
+        session, snapshot, seeds = analyzer.analyze(scenario.descriptor, agent_dir)
         cost = round(time.perf_counter() - start, 4)
-        generation_snapshot = _generic_snapshot(snapshot) if generic_context else snapshot
-        cases = Tool2Generator(enable_llm_variants=llm_variants).generate(
+        generation_snapshot = _generic_snapshot(snapshot) if scenario.generic_context else snapshot
+        cases = Tool2Generator(enable_llm_variants=scenario.llm_variants).generate(
             generation_snapshot,
             seeds,
             count=count,
             out_dir=agent_dir,
             profile=profile,
-            use_siraj_prompts=scenario_siraj_prompts,
+            use_siraj_prompts=scenario.siraj_prompts,
         )
-        if feedback:
+        if scenario.feedback:
             results = DEFAULT_EXECUTOR_REGISTRY.run(session.analysis_id, cases)
             write_json(agent_dir / "run_result.json", results)
             apply_feedback_to_analysis(agent_dir)
             seeds = [RiskSeed.from_dict(item) for item in load_json(agent_dir / "risk_seeds.json")]
         rows.append(
             {
-                **compute_tool1_metrics(descriptor.agent_ref, method, seeds, snapshot, truth, label_source, discovery_cost_s=cost),
-                **_prefixed(compute_tool2_metrics(descriptor.agent_ref, method, cases, generation_snapshot, ignore_dry_run=ignore_dry_run), ""),
+                **compute_tool1_metrics(descriptor.agent_ref, scenario.method, seeds, snapshot, truth, label_source, discovery_cost_s=cost),
+                **_prefixed(compute_tool2_metrics(descriptor.agent_ref, scenario.method, cases, generation_snapshot, ignore_dry_run=scenario.ignore_dry_run), ""),
             }
         )
     return rows
+
+
+def _ablation_scenarios(
+    descriptor: AgentAccessDescriptor,
+    enable_llm_evidence: bool | None,
+    enable_llm_runtime_events: bool | None,
+    enable_llm_review: bool | None,
+    enable_llm_variants: bool | None,
+    use_siraj_prompts: bool,
+) -> list[AblationScenario]:
+    """集中生成消融配置，默认值代表完整主方法。"""
+
+    def scenario(
+        method: str,
+        scenario_descriptor: AgentAccessDescriptor = descriptor,
+        dynamic: bool = True,
+        llm_evidence: bool | None = enable_llm_evidence,
+        llm_runtime_events: bool | None = enable_llm_runtime_events,
+        llm_review: bool | None = enable_llm_review,
+        llm_variants: bool | None = enable_llm_variants,
+        siraj_prompts: bool = use_siraj_prompts,
+        generic_context: bool = False,
+        ignore_dry_run: bool = False,
+        feedback: bool = True,
+    ) -> AblationScenario:
+        return AblationScenario(
+            method=method,
+            descriptor=scenario_descriptor,
+            dynamic=dynamic,
+            llm_evidence=llm_evidence,
+            llm_runtime_events=llm_runtime_events,
+            llm_review=llm_review,
+            llm_variants=llm_variants,
+            siraj_prompts=siraj_prompts,
+            generic_context=generic_context,
+            ignore_dry_run=ignore_dry_run,
+            feedback=feedback,
+        )
+
+    return [
+        scenario("ours_full"),
+        scenario("w/o_static_parsing", scenario_descriptor=_without_optional_artifacts(descriptor)),
+        scenario("w/o_dynamic_probe", dynamic=False),
+        scenario("w/o_semantic_evidence", llm_evidence=False),
+        scenario("w/o_runtime_event_induction", llm_runtime_events=False),
+        scenario("w/o_llm_review", llm_review=False),
+        scenario("w/o_siraj_prompts", siraj_prompts=False),
+        scenario("w/o_context_binding", generic_context=True),
+        scenario("w/o_dry_run", ignore_dry_run=True),
+        scenario("w/o_feedback", feedback=False),
+    ]
 
 
 def _synthetic_seeds(snapshot: AgentSnapshot, domains: list[str], method: str) -> list[RiskSeed]:
