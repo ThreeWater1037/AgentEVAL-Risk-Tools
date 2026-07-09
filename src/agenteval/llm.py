@@ -1,3 +1,9 @@
+"""DeepSeek JSON 调用封装。
+
+Tool1/Tool2 的 LLM 能力都通过这个轻量客户端进入系统。没有 API key 或返回
+非 JSON 时会抛 LLMUnavailable，上层必须保留确定性路径或显式 skipped 状态。
+"""
+
 from __future__ import annotations
 
 import json
@@ -9,11 +15,15 @@ from typing import Any
 
 
 class LLMUnavailable(RuntimeError):
+    """LLM 不可用、请求失败或返回格式不满足 JSON 协议。"""
+
     pass
 
 
 @dataclass
 class LLMConfig:
+    """从环境变量读取的 DeepSeek 调用配置。"""
+
     provider: str = "deepseek"
     model: str = "deepseek-v4-pro"
     base_url: str = "https://api.deepseek.com"
@@ -33,15 +43,19 @@ class LLMConfig:
 
 
 class DeepSeekJSONClient:
+    """只面向 JSON object 响应的 DeepSeek 客户端。"""
+
     def __init__(self, api_key: str | None = None, config: LLMConfig | None = None):
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
         self.config = config or LLMConfig.from_env()
 
     @property
     def available(self) -> bool:
+        """只用 API key 判断可用性，避免初始化阶段发网络请求。"""
         return bool(self.api_key)
 
     def complete_json(self, system_prompt: str, user_payload: dict[str, Any]) -> dict[str, Any]:
+        """发送系统提示和结构化 payload，并强制解析为 JSON object。"""
         if not self.api_key:
             raise LLMUnavailable("DEEPSEEK_API_KEY is not set.")
         body = {
@@ -81,5 +95,6 @@ class DeepSeekJSONClient:
 
 
 def truncate_text(value: Any, limit: int = 1200) -> str:
+    """控制传给 LLM 的上下文长度，避免 prompt 被大型对象撑爆。"""
     text = json.dumps(value, ensure_ascii=False, default=str) if not isinstance(value, str) else value
     return text if len(text) <= limit else text[:limit] + "...<truncated>"

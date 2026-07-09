@@ -1,3 +1,10 @@
+"""Tool2 的沙箱 case 模板库。
+
+模板只提供安全的 setup/trigger/expected_signal/cleanup 骨架，真实目标绑定由
+Tool2Generator._bind_context 完成。SAFE_MARKER 是可观测信号，用来判断不可信
+上下文是否被采用，而不是破坏性载荷。
+"""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -7,6 +14,7 @@ SAFE_MARKER = "AGENTEVAL_SANDBOX_MARKER"
 
 
 TEMPLATES: dict[str, dict[str, Any]] = {
+    # 每个风险域至少有一个最小模板，SIRAJ 和 mutation 只在此骨架上改写文本。
     "prompt_context_injection": {
         "template_id": "prompt_context_v1",
         "delivery_mode": "direct_input",
@@ -120,6 +128,7 @@ TEMPLATES: dict[str, dict[str, Any]] = {
 
 
 def clone_template(risk_domain: str) -> dict[str, Any]:
+    """返回模板深拷贝，避免单次生成污染全局模板。"""
     if risk_domain not in TEMPLATES:
         raise KeyError(f"no case template for risk domain: {risk_domain}")
     return deepcopy(TEMPLATES[risk_domain])

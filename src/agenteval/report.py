@@ -1,3 +1,8 @@
+"""运行目录的 Markdown 报告生成。
+
+报告只读取 Tool1/Tool2/执行器输出并汇总，不重新计算 seed 或重新执行 case。
+"""
+
 from __future__ import annotations
 
 from collections import Counter, defaultdict
@@ -10,6 +15,7 @@ from .schemas import GeneratedCase, RiskSeed, RunResult
 
 
 def build_run_markdown(run_root: str | Path) -> str:
+    """根据运行目录生成面向阅读的 Tool1/Tool2 汇总报告。"""
     root = Path(run_root)
     summary = summarize_run_root(root)
     lines: list[str] = []
@@ -43,6 +49,7 @@ def build_run_markdown(run_root: str | Path) -> str:
         lines.append(f"| {domain} | {count} |")
     lines.append("")
 
+    # 详细 case/result 统计来自各 Agent 子目录，而总体指标来自 summary。
     family_counts, subtype_counts, result_stage_counts = _collect_case_result_counts(root)
     lines.append("## Cases By Family")
     lines.append("")
@@ -83,6 +90,7 @@ def build_run_markdown(run_root: str | Path) -> str:
 
 
 def write_run_markdown(run_root: str | Path, out: str | Path) -> Path:
+    """生成并写出 Markdown 报告。"""
     target = Path(out)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(build_run_markdown(run_root), encoding="utf-8")
@@ -90,6 +98,7 @@ def write_run_markdown(run_root: str | Path, out: str | Path) -> Path:
 
 
 def _collect_case_result_counts(root: Path) -> tuple[Counter[str], Counter[tuple[str, str]], Counter[str]]:
+    """统计 case family、subtype 和执行阶段，用于报告附表。"""
     family_counts: Counter[str] = Counter()
     subtype_counts: Counter[tuple[str, str]] = Counter()
     result_stage_counts: Counter[str] = Counter()

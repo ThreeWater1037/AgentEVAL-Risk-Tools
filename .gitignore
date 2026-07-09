@@ -28,3 +28,4 @@ py_write_probe/
 Thumbs.db
 .idea/
 .vscode/
+.VSCodeCounter/

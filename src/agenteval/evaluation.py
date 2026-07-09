@@ -1,3 +1,10 @@
+"""Tool1/Tool2 的论文式代理评估。
+
+该模块跑完整 `Agent -> Tool1 -> Risk Seed -> Tool2 -> Case -> Sandbox` 流程，
+并生成 CSV/JSON/Markdown 表格。默认指标是 dry-run/proxy 指标，不代表真实攻击
+成功率；真实执行器接入后可以复用同一表格入口。
+"""
+
 from __future__ import annotations
 
 import csv
@@ -21,6 +28,7 @@ from .tool2.templates import SAFE_MARKER
 
 
 ALL_RISK_DOMAINS = (
+    # 评估、baseline 和消融共同使用的风险域全集。
     "prompt_context_injection",
     "rag_poisoning",
     "memory_poisoning",
@@ -32,6 +40,7 @@ ALL_RISK_DOMAINS = (
 )
 
 EXECUTOR_BY_DOMAIN = {
+    # 真实执行器未注册时，Tool2 dry-run 会落到 sandbox fallback。
     "prompt_context_injection": "prompt_orchestrator",
     "rag_poisoning": "rag_poison_runner",
     "memory_poisoning": "memory_runner",
@@ -57,9 +66,11 @@ def evaluate_tool12(
     include_direct_llm: bool = False,
     random_seed: int = 13,
 ) -> dict[str, Any]:
+    """运行主方法、baseline、消融，并写出论文表格所需的所有中间指标。"""
     output = ensure_dir(out_dir)
     labels = labels or {}
     label_source = "explicit_labels" if labels else "descriptor_expected_domains"
+    print(f"【实验】开始Tool1/Tool2评估：agents={len(descriptors)}，label_source={label_source}，输出目录={output}")
 
     full_rows: list[dict[str, Any]] = []
     tool1_rows: list[dict[str, Any]] = []
@@ -67,19 +78,27 @@ def evaluate_tool12(
     baseline_rows: list[dict[str, Any]] = []
     ablation_rows: list[dict[str, Any]] = []
 
-    for descriptor in descriptors:
+    for agent_index, descriptor in enumerate(descriptors, start=1):
+        print(f"【实验】[{agent_index}/{len(descriptors)}] 开始处理Agent：{descriptor.agent_ref}")
         truth = set(labels.get(descriptor.agent_ref, descriptor.expected_domains))
         agent_dir = ensure_dir(output / "runs" / "ours" / _safe_name(descriptor.agent_ref))
         start = time.perf_counter()
+        # 主方法：Tool1 先证据驱动发现 seed，Tool2 再按 seed 生成上下文绑定用例。
         analyzer = Tool1Analyzer(
             enable_dynamic_probe=True,
             enable_llm_evidence=enable_llm_evidence,
             enable_llm_runtime_events=enable_llm_runtime_events,
             enable_llm_review=enable_llm_review,
         )
+        print(f"【Tool1】开始风险发现：agent={descriptor.agent_ref}")
         session, snapshot, seeds_before_feedback = analyzer.analyze(descriptor, agent_dir)
         discovery_cost_s = round(time.perf_counter() - start, 4)
+        print(
+            f"【Tool1】完成风险发现：agent={descriptor.agent_ref}，"
+            f"evidence={len(snapshot.evidence_index)}，seeds={len(seeds_before_feedback)}，耗时={discovery_cost_s}s"
+        )
         generator = Tool2Generator(enable_llm_variants=enable_llm_variants)
+        print(f"【Tool2】开始生成测试用例：agent={descriptor.agent_ref}，count={count}，profile={profile}，siraj={use_siraj_prompts}")
         cases = generator.generate(
             snapshot,
             seeds_before_feedback,
@@ -88,11 +107,16 @@ def evaluate_tool12(
             profile=profile,
             use_siraj_prompts=use_siraj_prompts,
         )
+        print(f"【Tool2】完成测试用例生成：agent={descriptor.agent_ref}，cases={len(cases)}")
+        print(f"【执行器】开始执行测试用例：agent={descriptor.agent_ref}，cases={len(cases)}")
         results = DEFAULT_EXECUTOR_REGISTRY.run(session.analysis_id, cases)
         write_json(agent_dir / "run_result.json", results)
+        print(f"【执行器】完成测试用例执行：agent={descriptor.agent_ref}，results={len(results)}")
+        # 执行反馈会回写 risk_seeds.json，因此后面重新读取更新后的 seed。
         feedback_summary = apply_feedback_to_analysis(agent_dir)
         seeds = [RiskSeed.from_dict(item) for item in load_json(agent_dir / "risk_seeds.json")]
 
+        print(f"【指标】开始计算Tool1/Tool2指标：agent={descriptor.agent_ref}")
         tool1 = compute_tool1_metrics(
             descriptor.agent_ref,
             "ours",
@@ -107,7 +131,13 @@ def evaluate_tool12(
         full_rows.append({**tool1, **_prefixed(tool2, "tool2_")})
         tool1_rows.append(tool1)
         tool2_rows.append(tool2)
+        print(
+            f"【指标】完成主方法指标：agent={descriptor.agent_ref}，"
+            f"seed_f1={tool1['seed_f1']}，schema_valid_rate={tool2['schema_valid_rate']}，"
+            f"updated_seeds={feedback_summary['updated_seeds']}"
+        )
 
+        print(f"【Baseline】开始对比实验：agent={descriptor.agent_ref}")
         baseline_rows.extend(
             _evaluate_baselines(
                 descriptor,
@@ -120,6 +150,8 @@ def evaluate_tool12(
                 include_direct_llm,
             )
         )
+        print(f"【Baseline】完成对比实验：agent={descriptor.agent_ref}")
+        print(f"【Ablation】开始消融实验：agent={descriptor.agent_ref}")
         ablation_rows.extend(
             _evaluate_ablations(
                 descriptor,
@@ -135,6 +167,7 @@ def evaluate_tool12(
                 output / "runs" / "ablations",
             )
         )
+        print(f"【Ablation】完成消融实验：agent={descriptor.agent_ref}")
 
     aggregate = {
         "label_source": label_source,
@@ -153,6 +186,10 @@ def evaluate_tool12(
         build_paper_tables(tool1_rows, tool2_rows, baseline_rows, ablation_rows, aggregate),
         encoding="utf-8",
     )
+    print(
+        "【实验】评估完成："
+        f"tool1_metrics/tool2_metrics/baseline_metrics/ablation_metrics/evaluation_summary/paper_tables 已写入 {output}"
+    )
     return aggregate
 
 
@@ -165,6 +202,7 @@ def compute_tool1_metrics(
     label_source: str,
     discovery_cost_s: float = 0.0,
 ) -> dict[str, Any]:
+    """计算 Tool1 risk-domain 发现质量和证据完整性。"""
     detected = {seed.risk_domain for seed in seeds if seed.status != "candidate"}
     hits = detected & truth
     precision = len(hits) / max(1, len(detected))
@@ -201,6 +239,7 @@ def compute_tool2_metrics(
     snapshot: AgentSnapshot,
     ignore_dry_run: bool = False,
 ) -> dict[str, Any]:
+    """计算 Tool2 生成用例的 schema、dry-run、相关性、多样性和溯源指标。"""
     case_count = len(cases)
     schema_valid = [bool(case.validation_result.get("schema_valid")) for case in cases]
     dry_valid = [bool(case.validation_result.get("dry_run_valid", True)) for case in cases]
@@ -242,6 +281,7 @@ def compute_tool2_metrics(
 
 
 def load_label_file(path: str | Path) -> dict[str, list[str]]:
+    """读取 JSON/CSV/JSONL/XLSX 标签文件，输出 agent_ref -> risk domains。"""
     data = _read_records_or_mapping(path)
     if isinstance(data, dict):
         labels: dict[str, list[str]] = {}
@@ -263,6 +303,7 @@ def load_label_file(path: str | Path) -> dict[str, list[str]]:
 
 
 def import_paper_results(input_path: str | Path, out_dir: str | Path) -> dict[str, Any]:
+    """导入外部/人工/真实执行结果，只归一化和汇总，不改写原始数值。"""
     output = ensure_dir(out_dir)
     records = _read_records(input_path)
     normalized = [_normalize_result_record(record) for record in records]
@@ -275,6 +316,7 @@ def import_paper_results(input_path: str | Path, out_dir: str | Path) -> dict[st
 
 
 def aggregate_rows(rows: list[dict[str, Any]], group_key: str = "method") -> list[dict[str, Any]]:
+    """按 method/source 等字段聚合数值列平均值。"""
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[str(row.get(group_key, "unknown"))].append(row)
@@ -297,6 +339,7 @@ def build_paper_tables(
     ablation_rows: list[dict[str, Any]],
     aggregate: dict[str, Any],
 ) -> str:
+    """把各类指标渲染成 Markdown 表，便于论文/报告直接引用。"""
     lines = [
         "# Tool1/Tool2 Paper Tables",
         "",
@@ -350,6 +393,7 @@ def _evaluate_baselines(
     random_seed: int,
     include_direct_llm: bool,
 ) -> list[dict[str, Any]]:
+    """生成 all_domains、random_domains、fixed_template 和可选 direct_llm 对照。"""
     rows: list[dict[str, Any]] = []
     rng = random.Random(f"{random_seed}:{descriptor.agent_ref}")
     scenarios = {
@@ -392,6 +436,7 @@ def _evaluate_direct_llm_baseline(
     label_source: str,
     count: int,
 ) -> dict[str, Any]:
+    """直接让 LLM 从 snapshot 生成 case 的 baseline；无 key 时显式 skipped。"""
     client = DeepSeekJSONClient()
     if not client.available:
         return {
@@ -451,6 +496,7 @@ def _evaluate_direct_llm_baseline(
 
 
 def _coerce_direct_llm_cases(payload: dict[str, Any], snapshot: AgentSnapshot) -> list[GeneratedCase]:
+    """把 direct LLM 输出强制套回 GeneratedCase，并复用 Tool2 校验器。"""
     raw_cases = payload.get("cases", [])
     if not isinstance(raw_cases, list):
         return []
@@ -524,6 +570,7 @@ def _evaluate_ablations(
     use_siraj_prompts: bool,
     out_root: Path,
 ) -> list[dict[str, Any]]:
+    """逐项关闭静态解析、动态 probe、语义证据、SIRAJ 等模块做消融。"""
     rows: list[dict[str, Any]] = []
     scenarios = [
         ("ours_full", descriptor, True, enable_llm_evidence, enable_llm_runtime_events, enable_llm_review, enable_llm_variants, use_siraj_prompts, False, False, True),
@@ -572,6 +619,7 @@ def _evaluate_ablations(
 
 
 def _synthetic_seeds(snapshot: AgentSnapshot, domains: list[str], method: str) -> list[RiskSeed]:
+    """为 baseline 构造有固定证据引用的合成 seed。"""
     evidence_id = snapshot.evidence_index[0].evidence_id if snapshot.evidence_index else f"ev_{method}"
     return [
         RiskSeed(
@@ -592,6 +640,7 @@ def _synthetic_seeds(snapshot: AgentSnapshot, domains: list[str], method: str) -
 
 
 def _target_relevant(case: GeneratedCase, snapshot: AgentSnapshot) -> bool:
+    """检查 case 的风险域是否与 snapshot 中观测到的能力匹配。"""
     capabilities = snapshot.capabilities
     if case.attack_family == "rag_poisoning":
         return bool(capabilities.get("rag"))
@@ -630,6 +679,7 @@ def _without_optional_artifacts(descriptor: AgentAccessDescriptor) -> AgentAcces
 
 
 def _generic_snapshot(snapshot: AgentSnapshot) -> AgentSnapshot:
+    """消融 context binding 时移除 api_spec/tool_schemas，保留其他观测。"""
     return AgentSnapshot(
         analysis_id=snapshot.analysis_id,
         agent_ref=snapshot.agent_ref,
@@ -649,6 +699,7 @@ def _write_metric_bundle(out_dir: Path, stem: str, rows: list[dict[str, Any]]) -
 
 
 def write_csv(path: str | Path, rows: list[dict[str, Any]]) -> Path:
+    """用所有行的 key 并集写 CSV，保持不同方法字段可并排比较。"""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = sorted({key for row in rows for key in row})
@@ -661,6 +712,7 @@ def write_csv(path: str | Path, rows: list[dict[str, Any]]) -> Path:
 
 
 def _read_records_or_mapping(path: str | Path) -> Any:
+    """标签文件可以是映射，也可以是记录列表；上层按类型继续规范化。"""
     resolved = Path(path)
     if resolved.suffix.lower() == ".json":
         return load_json(resolved)
@@ -668,6 +720,7 @@ def _read_records_or_mapping(path: str | Path) -> Any:
 
 
 def _read_records(path: str | Path) -> list[dict[str, Any]]:
+    """读取 JSON/JSONL/CSV/XLSX 为记录列表。"""
     resolved = Path(path)
     suffix = resolved.suffix.lower()
     if suffix == ".json":
@@ -708,6 +761,7 @@ def _split_domains(value: str) -> list[str]:
 
 
 def _markdown_table(title: str, rows: list[dict[str, Any]], columns: list[str] | None = None) -> list[str]:
+    """渲染简单 Markdown 表；空表显式写 No rows。"""
     lines = [f"## {title}", ""]
     if not rows:
         return [*lines, "_No rows._", ""]
@@ -733,6 +787,7 @@ def _prefixed(row: dict[str, Any], prefix: str) -> dict[str, Any]:
 
 
 def _as_float(value: Any) -> float | None:
+    """聚合时只对可解析数值列求平均。"""
     if value is None or value == "":
         return None
     if isinstance(value, bool):

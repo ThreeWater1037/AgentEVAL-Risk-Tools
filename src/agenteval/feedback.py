@@ -1,3 +1,9 @@
+"""执行反馈到 RiskSeed 置信度的轻量闭环。
+
+该模块读取 run_result.json 和 generated_cases.json，只对已有 seed 的 confidence
+和 status 做小幅调整，并记录原因；不会新增 seed，也不会覆盖 Tool1 的证据链。
+"""
+
 from __future__ import annotations
 
 from collections import Counter, defaultdict
@@ -9,6 +15,7 @@ from .schemas import RiskSeed, utc_now_iso
 
 
 STAGE_ADJUSTMENTS = {
+    # failure_stage 到置信度调整量的代理映射，幅度故意较小，避免单轮结果过拟合。
     "attack_success": 0.06,
     "action_blocked": 0.03,
     "retrieved_not_adopted": 0.02,
@@ -20,7 +27,9 @@ STAGE_ADJUSTMENTS = {
 
 
 def apply_feedback_to_analysis(analysis_dir: str | Path) -> dict[str, Any]:
+    """读取一次分析目录的执行结果，回写 risk_seeds.json 和 feedback_summary.json。"""
     root = Path(analysis_dir)
+    print(f"【反馈】开始处理执行反馈：{root}")
     seeds_path = root / "risk_seeds.json"
     results_path = root / "run_result.json"
     cases_path = root / "generated_cases.json"
@@ -45,6 +54,7 @@ def apply_feedback_to_analysis(analysis_dir: str | Path) -> dict[str, Any]:
             continue
         before = seed.confidence
         stages = Counter(str(item.get("failure_stage", "unknown")) for item in seed_results)
+        # stage 调整反映触发轨迹，quality 调整反映 Tool2 case 自身质量。
         stage_adjustment = sum(STAGE_ADJUSTMENTS.get(stage, -0.01) * count for stage, count in stages.items()) / max(1, len(seed_results))
         quality_adjustment = _quality_adjustment(seed_results, case_quality)
         adjustment = round(stage_adjustment + quality_adjustment, 3)
@@ -80,10 +90,12 @@ def apply_feedback_to_analysis(analysis_dir: str | Path) -> dict[str, Any]:
         "per_seed": per_seed,
     }
     write_json(root / "feedback_summary.json", summary)
+    print(f"【反馈】完成：更新seed数={changed}，总seed数={len(seeds)}，结果记录数={len(results)}")
     return summary
 
 
 def _quality_adjustment(results: list[dict[str, Any]], case_quality: dict[str, float]) -> float:
+    """用相关 case 的平均质量分补充微调 seed 置信度。"""
     qualities = [case_quality.get(str(item.get("case_id", "")), 0.0) for item in results]
     if not qualities:
         return 0.0
@@ -96,6 +108,7 @@ def _quality_adjustment(results: list[dict[str, Any]], case_quality: dict[str, f
 
 
 def _feedback_reason(stages: Counter[str]) -> str:
+    """把主要执行阶段转成可读反馈原因，便于报告和调试。"""
     if stages.get("attack_success"):
         return "execution evidence confirmed at least one generated case"
     if stages.get("setup_failed"):

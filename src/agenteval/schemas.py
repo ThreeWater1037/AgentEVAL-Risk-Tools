@@ -1,3 +1,10 @@
+"""AgentEVAL 的核心数据契约。
+
+这些 dataclass 是 Tool1/Tool2 之间的稳定边界：外部目标先被描述成
+AgentAccessDescriptor，Tool1 产出 AgentSnapshot 和 RiskSeed，Tool2 再把
+RiskSeed 转成 GeneratedCase，执行器最终写回 RunResult。
+"""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -9,10 +16,12 @@ JsonDict = dict[str, Any]
 
 
 def utc_now_iso() -> str:
+    """统一使用 UTC 秒级时间，避免本地时区影响可复现实验记录。"""
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def to_jsonable(value: Any) -> Any:
+    """把嵌套 dataclass/list/dict 转成可稳定写入 JSON 的普通对象。"""
     if is_dataclass(value):
         return {k: to_jsonable(v) for k, v in asdict(value).items() if v is not None}
     if isinstance(value, list):
@@ -24,6 +33,8 @@ def to_jsonable(value: Any) -> Any:
 
 @dataclass
 class AgentAccessDescriptor:
+    """外部 Agent 的访问说明，也是 Tool1 的唯一输入边界。"""
+
     agent_ref: str
     protocol: str = "mock"
     endpoint: str | None = None
@@ -43,6 +54,7 @@ class AgentAccessDescriptor:
 
     @classmethod
     def from_dict(cls, data: JsonDict) -> "AgentAccessDescriptor":
+        """兼容不同清单字段名，把用户/注册表输入规范化成描述符。"""
         return cls(
             agent_ref=str(data["agent_ref"]),
             protocol=str(data.get("protocol", "mock")),
@@ -65,12 +77,16 @@ class AgentAccessDescriptor:
 
 @dataclass
 class ConnectorEvent:
+    """连接器观测到的一条运行时事件，如检索、记忆、工具调用。"""
+
     event_type: str
     detail: JsonDict
 
 
 @dataclass
 class ConnectorResponse:
+    """一次 probe 或用户请求的响应，保留原始结构以便 Tool1 继续抽取证据。"""
+
     ok: bool
     content: str
     raw: JsonDict = field(default_factory=dict)
@@ -79,6 +95,8 @@ class ConnectorResponse:
 
 @dataclass
 class EvidenceItem:
+    """Tool1 的原子证据；RiskSeed 必须引用这些 evidence_id，避免无依据推断。"""
+
     evidence_id: str
     analysis_id: str
     source_type: str
@@ -90,6 +108,7 @@ class EvidenceItem:
 
     @classmethod
     def from_dict(cls, data: JsonDict) -> "EvidenceItem":
+        """从 JSON 恢复证据对象，容忍缺省 detail/confidence 字段。"""
         return cls(
             evidence_id=str(data["evidence_id"]),
             analysis_id=str(data["analysis_id"]),
@@ -104,6 +123,8 @@ class EvidenceItem:
 
 @dataclass
 class AgentSnapshot:
+    """Tool1 对目标 Agent 的快照：能力、工具、运行时观测和证据索引。"""
+
     analysis_id: str
     agent_ref: str
     connector_type: str
@@ -116,6 +137,7 @@ class AgentSnapshot:
 
     @classmethod
     def from_dict(cls, data: JsonDict) -> "AgentSnapshot":
+        """恢复 snapshot 时同时恢复 evidence_index 的强类型对象。"""
         return cls(
             analysis_id=str(data["analysis_id"]),
             agent_ref=str(data["agent_ref"]),
@@ -131,6 +153,8 @@ class AgentSnapshot:
 
 @dataclass
 class AnalysisSession:
+    """一次 Tool1 分析会话的元信息，默认只允许安全 probe。"""
+
     analysis_id: str
     agent_access: AgentAccessDescriptor
     connector_type: str
@@ -140,6 +164,8 @@ class AnalysisSession:
 
 @dataclass
 class RiskSeed:
+    """从证据规则推出来的风险种子，是 Tool1 交给 Tool2 的最小任务单元。"""
+
     seed_id: str
     analysis_id: str
     risk_domain: str
@@ -154,6 +180,7 @@ class RiskSeed:
 
     @classmethod
     def from_dict(cls, data: JsonDict) -> "RiskSeed":
+        """把持久化的 risk seed 读回对象，缺省状态保守设为 candidate。"""
         return cls(
             seed_id=str(data["seed_id"]),
             analysis_id=str(data["analysis_id"]),
@@ -171,6 +198,8 @@ class RiskSeed:
 
 @dataclass
 class GeneratedCase:
+    """Tool2 生成的沙箱测试用例，包含 setup/trigger/cleanup 与来源记录。"""
+
     case_id: str
     seed_id: str
     attack_family: str
@@ -186,6 +215,7 @@ class GeneratedCase:
 
     @classmethod
     def from_dict(cls, data: JsonDict) -> "GeneratedCase":
+        """恢复生成用例；validation_result 缺省为空，便于导入外部样本。"""
         return cls(
             case_id=str(data["case_id"]),
             seed_id=str(data["seed_id"]),
@@ -204,6 +234,8 @@ class GeneratedCase:
 
 @dataclass
 class RunResult:
+    """执行器回传的用例运行结果，后续会用于 seed 置信度反馈。"""
+
     run_id: str
     analysis_id: str
     seed_id: str
@@ -214,6 +246,7 @@ class RunResult:
 
 
 def _normalize_artifacts(value: Any) -> list[JsonDict]:
+    """允许 optional_artifacts 使用路径字符串或完整对象两种写法。"""
     artifacts: list[JsonDict] = []
     for item in value:
         if isinstance(item, str):

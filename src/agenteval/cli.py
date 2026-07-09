@@ -1,3 +1,9 @@
+"""AgentEVAL 命令行入口。
+
+CLI 将 Tool1、Tool2、执行器、反馈、评估和报告串成可复现的本地流程。
+默认 case 生成走 SIRAJ prompt 路径，`--legacy-prompts` 只作为显式回退/消融使用。
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -16,9 +22,11 @@ from .tool2 import Tool2Generator
 
 
 def main(argv: list[str] | None = None) -> int:
+    """注册所有子命令并分发到对应处理函数。"""
     parser = argparse.ArgumentParser(prog="agenteval")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # 单步 Tool1：从 descriptor 发现 evidence/snapshot/risk_seeds。
     analyze = sub.add_parser("analyze-agent", help="Run Tool1 against a descriptor.")
     analyze.add_argument("--descriptor", required=True)
     analyze.add_argument("--agent")
@@ -28,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_llm_runtime_event_flags(analyze)
     _add_llm_review_flags(analyze)
 
+    # 单步 Tool2：读取 Tool1 输出目录并生成 generated_cases.json。
     generate = sub.add_parser("generate-cases", help="Run Tool2 for one analysis directory.")
     generate.add_argument("--analysis-dir", required=True)
     generate.add_argument("--count", type=int, default=3)
@@ -35,9 +44,11 @@ def main(argv: list[str] | None = None) -> int:
     _add_case_prompt_flags(generate)
     _add_llm_variant_flags(generate)
 
+    # 单步执行：默认注册表会回退到确定性 sandbox。
     run_cases = sub.add_parser("run-cases", help="Run deterministic sandbox execution for generated cases.")
     run_cases.add_argument("--analysis-dir", required=True)
 
+    # 失败/低质量 case 的多轮 SIRAJ-style refinement。
     refine = sub.add_parser("refine-cases", help="Append SIRAJ-style refinements for failed or low-quality cases.")
     refine.add_argument("--analysis-dir", required=True)
     refine.add_argument("--rounds", type=int, default=1)
@@ -47,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     feedback = sub.add_parser("apply-feedback", help="Update risk seed confidence from run_result.json.")
     feedback.add_argument("--analysis-dir", required=True)
 
+    # 全链路论文式代理评估，写 CSV/JSON/Markdown 表格。
     evaluate = sub.add_parser("evaluate-tool12", help="Run transparent Tool1/Tool2 paper-style proxy evaluation.")
     evaluate.add_argument("--descriptors", required=True)
     evaluate.add_argument("--labels")
@@ -126,8 +138,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _cmd_analyze(args: argparse.Namespace) -> int:
+    """执行 Tool1，并按单目标/多目标选择输出目录。"""
     descriptors = _load_descriptors(args.descriptor)
     selected = _select_descriptors(descriptors, args.agent)
+    print(f"【CLI】开始Tool1风险发现：输入={args.descriptor}，目标数量={len(selected)}，输出目录={args.out}")
     analyzer = Tool1Analyzer(
         enable_dynamic_probe=not args.no_dynamic_probe,
         enable_llm_evidence=args.llm_evidence,
@@ -137,13 +151,16 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     out = ensure_dir(args.out)
     for descriptor in selected:
         target = out if len(selected) == 1 else out / _safe_name(descriptor.agent_ref)
+        print(f"【Tool1】开始分析Agent：{descriptor.agent_ref}")
         analyzer.analyze(descriptor, target)
-        print(f"analyzed {descriptor.agent_ref} -> {target}")
+        print(f"【Tool1】完成分析Agent：{descriptor.agent_ref}，输出目录={target}")
     return 0
 
 
 def _cmd_generate(args: argparse.Namespace) -> int:
+    """读取已有分析目录，执行 Tool2 case 生成。"""
     analysis_dir = Path(args.analysis_dir)
+    print(f"【CLI】开始Tool2用例生成：analysis_dir={analysis_dir}，count={args.count}，profile={args.profile}")
     snapshot = AgentSnapshot.from_dict(load_json(analysis_dir / "agent_snapshot.json"))
     seeds = [RiskSeed.from_dict(item) for item in load_json(analysis_dir / "risk_seeds.json")]
     cases = Tool2Generator(enable_llm_variants=args.llm_variants).generate(
@@ -154,22 +171,26 @@ def _cmd_generate(args: argparse.Namespace) -> int:
         profile=args.profile,
         use_siraj_prompts=args.siraj_prompts,
     )
-    print(f"generated {len(cases)} cases -> {analysis_dir / 'generated_cases.json'}")
+    print(f"【Tool2】完成用例生成：cases={len(cases)}，输出={analysis_dir / 'generated_cases.json'}")
     return 0
 
 
 def _cmd_run_cases(args: argparse.Namespace) -> int:
+    """执行 generated_cases.json，并写出 run_result.json。"""
     analysis_dir = Path(args.analysis_dir)
+    print(f"【CLI】开始执行测试用例：analysis_dir={analysis_dir}")
     snapshot = AgentSnapshot.from_dict(load_json(analysis_dir / "agent_snapshot.json"))
     cases = [GeneratedCase.from_dict(item) for item in load_json(analysis_dir / "generated_cases.json")]
     results = DEFAULT_EXECUTOR_REGISTRY.run(snapshot.analysis_id, cases)
     write_json(analysis_dir / "run_result.json", results)
-    print(f"ran {len(results)} sandbox cases -> {analysis_dir / 'run_result.json'}")
+    print(f"【执行器】完成测试用例执行：results={len(results)}，输出={analysis_dir / 'run_result.json'}")
     return 0
 
 
 def _cmd_refine_cases(args: argparse.Namespace) -> int:
+    """根据 run_result.json 对低质量或失败 case 追加 refinement。"""
     analysis_dir = Path(args.analysis_dir)
+    print(f"【CLI】开始多轮refinement：analysis_dir={analysis_dir}，rounds={args.rounds}，quality_threshold={args.quality_threshold}")
     snapshot = AgentSnapshot.from_dict(load_json(analysis_dir / "agent_snapshot.json"))
     seeds = [RiskSeed.from_dict(item) for item in load_json(analysis_dir / "risk_seeds.json")]
     cases = [GeneratedCase.from_dict(item) for item in load_json(analysis_dir / "generated_cases.json")]
@@ -183,17 +204,21 @@ def _cmd_refine_cases(args: argparse.Namespace) -> int:
         out_dir=analysis_dir,
         quality_threshold=args.quality_threshold,
     )
-    print(f"refined cases total={len(refined)} appended={len(refined) - len(cases)} -> {analysis_dir / 'generated_cases.json'}")
+    print(f"【Tool2】完成refinement：总cases={len(refined)}，新增={len(refined) - len(cases)}，输出={analysis_dir / 'generated_cases.json'}")
     return 0
 
 
 def _cmd_apply_feedback(args: argparse.Namespace) -> int:
+    """把执行结果反馈回 risk_seeds.json 的 confidence/status。"""
+    print(f"【CLI】开始反馈更新：analysis_dir={args.analysis_dir}")
     summary = apply_feedback_to_analysis(args.analysis_dir)
-    print(f"updated {summary['updated_seeds']} seeds -> {Path(args.analysis_dir) / 'risk_seeds.json'}")
+    print(f"【反馈】完成反馈更新：updated_seeds={summary['updated_seeds']}，输出={Path(args.analysis_dir) / 'risk_seeds.json'}")
     return 0
 
 
 def _cmd_evaluate_tool12(args: argparse.Namespace) -> int:
+    """运行主方法、baseline 和消融，生成评估汇总。"""
+    print(f"【CLI】开始论文式评估：descriptors={args.descriptors}，输出目录={args.out}")
     descriptors = _load_descriptors(args.descriptors)
     labels = load_label_file(args.labels) if args.labels else None
     summary = evaluate_tool12(
@@ -211,21 +236,25 @@ def _cmd_evaluate_tool12(args: argparse.Namespace) -> int:
         random_seed=args.random_seed,
     )
     print(
-        f"evaluated agents={summary['agents']} label_source={summary['label_source']} "
-        f"-> {Path(args.out) / 'paper_tables.md'}"
+        f"【实验】评估完成：agents={summary['agents']}，label_source={summary['label_source']}，"
+        f"表格={Path(args.out) / 'paper_tables.md'}"
     )
     return 0
 
 
 def _cmd_import_paper_results(args: argparse.Namespace) -> int:
+    """导入外部实验结果并生成同格式表格。"""
+    print(f"【CLI】开始导入论文结果：input={args.input}，输出目录={args.out}")
     summary = import_paper_results(args.input, args.out)
-    print(f"imported records={summary['records']} -> {Path(args.out) / 'paper_tables.md'}")
+    print(f"【导入】完成论文结果导入：records={summary['records']}，表格={Path(args.out) / 'paper_tables.md'}")
     return 0
 
 
 def _cmd_run_demo(args: argparse.Namespace) -> int:
+    """运行示例 descriptor 的全链路 demo。"""
     descriptors = _load_descriptors(args.descriptors)
     root = ensure_dir(args.out)
+    print(f"【CLI】开始demo全链路：agents={len(descriptors)}，输出目录={root}，count={args.count}，profile={args.profile}")
     analyzer = Tool1Analyzer(
         enable_dynamic_probe=True,
         enable_llm_evidence=args.llm_evidence,
@@ -237,10 +266,14 @@ def _cmd_run_demo(args: argparse.Namespace) -> int:
 
     for descriptor in descriptors:
         agent_dir = ensure_dir(root / _safe_name(descriptor.agent_ref))
+        print(f"【Demo】开始处理Agent：{descriptor.agent_ref}")
         session, snapshot, seeds = analyzer.analyze(descriptor, agent_dir)
+        print(f"【Tool1】完成：agent={descriptor.agent_ref}，seeds={len(seeds)}，evidence={len(snapshot.evidence_index)}")
         cases = generator.generate(snapshot, seeds, count=args.count, out_dir=agent_dir, profile=args.profile, use_siraj_prompts=args.siraj_prompts)
+        print(f"【Tool2】完成：agent={descriptor.agent_ref}，cases={len(cases)}")
         results = DEFAULT_EXECUTOR_REGISTRY.run(session.analysis_id, cases)
         write_json(agent_dir / "run_result.json", results)
+        print(f"【执行器】完成：agent={descriptor.agent_ref}，results={len(results)}")
         detected_domains = {seed.risk_domain for seed in seeds}
         expected_domains = set(descriptor.expected_domains)
         hits = detected_domains & expected_domains
@@ -254,7 +287,7 @@ def _cmd_run_demo(args: argparse.Namespace) -> int:
                 "recall_proxy": round(len(hits) / max(1, len(expected_domains)), 3),
             }
         )
-        print(f"{descriptor.agent_ref}: seeds={len(seeds)} cases={len(cases)} results={len(results)}")
+        print(f"【Demo】Agent处理完成：{descriptor.agent_ref}，seeds={len(seeds)}，cases={len(cases)}，results={len(results)}")
 
     summary = summarize_run_root(root)
     _augment_expected_summary(summary, per_agent_expected)
@@ -264,8 +297,10 @@ def _cmd_run_demo(args: argparse.Namespace) -> int:
 
 
 def _cmd_run_manifest(args: argparse.Namespace) -> int:
+    """从目标清单/注册表读取 descriptor 并跑全链路。"""
     descriptors = load_target_descriptors(args.manifest)
     root = ensure_dir(args.out)
+    print(f"【CLI】开始manifest全链路：targets={len(descriptors)}，manifest={args.manifest}，输出目录={root}")
     analyzer = Tool1Analyzer(
         enable_dynamic_probe=True,
         enable_llm_evidence=args.llm_evidence,
@@ -276,10 +311,14 @@ def _cmd_run_manifest(args: argparse.Namespace) -> int:
     per_agent_expected = []
     for descriptor in descriptors:
         agent_dir = ensure_dir(root / _safe_name(descriptor.agent_ref))
+        print(f"【Manifest】开始处理目标：{descriptor.agent_ref}")
         session, snapshot, seeds = analyzer.analyze(descriptor, agent_dir)
+        print(f"【Tool1】完成：target={descriptor.agent_ref}，seeds={len(seeds)}，evidence={len(snapshot.evidence_index)}")
         cases = generator.generate(snapshot, seeds, count=args.count, out_dir=agent_dir, profile=args.profile, use_siraj_prompts=args.siraj_prompts)
+        print(f"【Tool2】完成：target={descriptor.agent_ref}，cases={len(cases)}")
         results = DEFAULT_EXECUTOR_REGISTRY.run(session.analysis_id, cases)
         write_json(agent_dir / "run_result.json", results)
+        print(f"【执行器】完成：target={descriptor.agent_ref}，results={len(results)}")
         detected_domains = {seed.risk_domain for seed in seeds}
         expected_domains = set(descriptor.expected_domains)
         hits = detected_domains & expected_domains
@@ -293,7 +332,7 @@ def _cmd_run_manifest(args: argparse.Namespace) -> int:
                 "recall_proxy": round(len(hits) / max(1, len(expected_domains)), 3),
             }
         )
-        print(f"{descriptor.agent_ref}: seeds={len(seeds)} cases={len(cases)} results={len(results)}")
+        print(f"【Manifest】目标处理完成：{descriptor.agent_ref}，seeds={len(seeds)}，cases={len(cases)}，results={len(results)}")
     summary = summarize_run_root(root)
     _augment_expected_summary(summary, per_agent_expected)
     write_json(root / "summary.json", summary)
@@ -302,6 +341,7 @@ def _cmd_run_manifest(args: argparse.Namespace) -> int:
 
 
 def _load_descriptors(path: str | Path) -> list[AgentAccessDescriptor]:
+    """兼容单 descriptor、agents 列表和裸列表三种 JSON 形状。"""
     data = load_json(path)
     if isinstance(data, dict) and "agents" in data:
         items = data["agents"]
@@ -332,6 +372,7 @@ def _add_llm_review_flags(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_case_prompt_flags(parser: argparse.ArgumentParser) -> None:
+    """SIRAJ 为默认生成路径；legacy 仅用于回退和消融。"""
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--siraj-prompts",
@@ -416,6 +457,7 @@ def _select_descriptors(descriptors: list[AgentAccessDescriptor], agent_ref: str
 
 
 def _augment_expected_summary(summary: dict, per_agent_expected: list[dict]) -> None:
+    """给 demo/manifest 汇总追加基于 expected_domains 的代理 precision/recall。"""
     hits = sum(len(item["hits"]) for item in per_agent_expected)
     detected = sum(len(item["detected_domains"]) for item in per_agent_expected)
     expected = sum(len(item["expected_domains"]) for item in per_agent_expected)

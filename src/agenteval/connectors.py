@@ -1,3 +1,10 @@
+"""把不同形态的 Agent 统一包装成 Tool1 可 probe 的连接器。
+
+Tool1 不直接关心目标是 mock、HTTP、Python 函数还是本地 runner；这里把它们
+归一成 handshake/inspect/send/reset/close 五个动作，并尽量把结构化响应转成
+ConnectorEvent，供风险证据抽取使用。
+"""
+
 from __future__ import annotations
 
 import json
@@ -14,10 +21,13 @@ from .schemas import AgentAccessDescriptor, ConnectorEvent, ConnectorResponse
 
 
 class DirectAgentConnector(ABC):
+    """所有 Agent 访问方式的最小接口。"""
+
     def __init__(self, descriptor: AgentAccessDescriptor):
         self.descriptor = descriptor
 
     def handshake(self) -> dict[str, Any]:
+        """轻量探活；默认 descriptor 可用即视为可连接。"""
         return {"ok": True, "protocol": self.descriptor.protocol}
 
     @abstractmethod
@@ -28,6 +38,7 @@ class DirectAgentConnector(ABC):
         return None
 
     def inspect(self) -> dict[str, Any]:
+        """返回静态能力信息；子类可补充远端 schema 或本地 inspect 结果。"""
         return dict(self.descriptor.static_artifacts)
 
     def close(self) -> None:
@@ -35,7 +46,7 @@ class DirectAgentConnector(ABC):
 
 
 class MockAgentConnector(DirectAgentConnector):
-    """Safe connector used for descriptor-only experiments."""
+    """只基于描述符模拟响应的安全连接器，适合离线评估和示例数据。"""
 
     def send(self, prompt: str) -> ConnectorResponse:
         artifacts = self.descriptor.static_artifacts
@@ -120,6 +131,8 @@ class MockAgentConnector(DirectAgentConnector):
 
 
 class HttpAgentConnector(DirectAgentConnector):
+    """通过 HTTP 调目标 Agent，支持可选 healthcheck 和 schema inspect。"""
+
     def handshake(self) -> dict[str, Any]:
         if not self.descriptor.endpoint:
             return {"ok": False, "protocol": "http", "error": "missing endpoint"}
@@ -137,6 +150,7 @@ class HttpAgentConnector(DirectAgentConnector):
         if not self.descriptor.endpoint:
             return ConnectorResponse(False, "missing endpoint")
 
+        # request_template 只替换 prompt 占位符，不在这里推断业务字段语义。
         payload = _fill_template(self.descriptor.request_template, prompt)
         request = urllib.request.Request(
             self.descriptor.endpoint,
@@ -160,6 +174,7 @@ class HttpAgentConnector(DirectAgentConnector):
         return ConnectorResponse(ok=True, content=content, raw=parsed)
 
     def inspect(self) -> dict[str, Any]:
+        """读取远端 OpenAPI/schema 后与 descriptor 中的静态信息合并。"""
         path = self.descriptor.inspect.get("schema_path") or self.descriptor.inspect.get("openapi_path")
         if not path or not self.descriptor.endpoint:
             return dict(self.descriptor.static_artifacts)
@@ -182,6 +197,8 @@ class HttpAgentConnector(DirectAgentConnector):
 
 
 class PythonFunctionConnector(DirectAgentConnector):
+    """直接加载本地 Python callable，便于测试真实函数式 Agent。"""
+
     def __init__(self, descriptor: AgentAccessDescriptor):
         super().__init__(descriptor)
         self.state: dict[str, Any] = {}
@@ -195,6 +212,7 @@ class PythonFunctionConnector(DirectAgentConnector):
     def send(self, prompt: str) -> ConnectorResponse:
         payload = _fill_template(self.descriptor.request_template, prompt)
         sig = inspect.signature(self.callable)
+        # callable 可选择接收共享 state，用来模拟有记忆/状态的 Agent。
         if len(sig.parameters) >= 2:
             result = self.callable(payload, self.state)
         elif len(sig.parameters) == 1:
@@ -207,6 +225,7 @@ class PythonFunctionConnector(DirectAgentConnector):
         return ConnectorResponse(ok=True, content=content, raw=parsed, events=events)
 
     def reset(self) -> None:
+        """清空连接器维护的状态，并调用目标模块可选 reset 钩子。"""
         self.state.clear()
         reset_name = self.descriptor.python_callable.get("reset")
         if reset_name and hasattr(self.module, str(reset_name)):
@@ -224,6 +243,7 @@ class PythonFunctionConnector(DirectAgentConnector):
         return data
 
     def _load_module(self):
+        """支持从 module_path 或 importable module 两种方式加载目标代码。"""
         module_name = self.descriptor.python_callable.get("module")
         module_path = self.descriptor.python_callable.get("module_path")
         if module_path:
@@ -240,6 +260,8 @@ class PythonFunctionConnector(DirectAgentConnector):
 
 
 class RunnerAgentConnector(DirectAgentConnector):
+    """通过本地子进程 runner 调 Agent；适合 CLI 型目标。"""
+
     def send(self, prompt: str) -> ConnectorResponse:
         if not self.descriptor.runner:
             return ConnectorResponse(False, "missing runner")
@@ -279,6 +301,7 @@ class RunnerAgentConnector(DirectAgentConnector):
 
 
 def create_connector(descriptor: AgentAccessDescriptor) -> DirectAgentConnector:
+    """根据 descriptor.protocol 选择具体连接器。"""
     protocol = descriptor.protocol.lower()
     if protocol == "mock":
         return MockAgentConnector(descriptor)
@@ -292,6 +315,7 @@ def create_connector(descriptor: AgentAccessDescriptor) -> DirectAgentConnector:
 
 
 def _fill_template(template: Any, prompt: str) -> Any:
+    """递归替换 request_template 中的 {{prompt}} 占位符。"""
     if isinstance(template, str):
         return template.replace("{{prompt}}", prompt)
     if isinstance(template, list):
@@ -302,6 +326,7 @@ def _fill_template(template: Any, prompt: str) -> Any:
 
 
 def _lookup_response(parsed: dict[str, Any], response_key: str | None) -> str:
+    """优先用显式 response_key，否则从常见响应字段中提取文本。"""
     if response_key:
         cur: Any = parsed
         for part in response_key.split("."):
@@ -330,6 +355,7 @@ def _join_url(endpoint: str, path: str) -> str:
 
 
 def _events_from_structured_response(parsed: dict[str, Any]) -> list[ConnectorEvent]:
+    """从结构化响应中归纳 Tool1 可识别的运行时事件。"""
     events: list[ConnectorEvent] = []
     if any(key in parsed for key in ("retrieved_context", "retrieval", "sources")):
         events.append(ConnectorEvent("retrieval", {"source": "structured_response", "raw": _compact(parsed)}))

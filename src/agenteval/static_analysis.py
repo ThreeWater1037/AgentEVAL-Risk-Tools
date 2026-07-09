@@ -1,3 +1,10 @@
+"""静态 artifact 的轻量证据抽取。
+
+这里解析 OpenAPI、MCP manifest、依赖文件和普通结构化配置，把它们映射成
+Tool1 规则可消费的 feature/capability。该模块只做保守启发式识别，最终是否
+形成 RiskSeed 仍由 analyzer 中的证据聚合和规则匹配决定。
+"""
+
 from __future__ import annotations
 
 import json
@@ -7,6 +14,7 @@ from typing import Any
 
 
 KEY_FEATURES: tuple[tuple[re.Pattern[str], str, str | None, float], ...] = (
+    # 关键词 -> Tool1 feature -> capability 提示 -> 置信度。
     (re.compile(r"external[_ -]?context|context[_ -]?block|untrusted[_ -]?text", re.I), "external_context", None, 0.72),
     (re.compile(r"prompt[_ -]?template|system[_ -]?prompt|context[_ -]?window", re.I), "context_window_or_prompt_template", None, 0.72),
     (re.compile(r"rag|retriev|knowledge[_ -]?base", re.I), "retriever_config", "rag", 0.82),
@@ -37,6 +45,7 @@ KEY_FEATURES: tuple[tuple[re.Pattern[str], str, str | None, float], ...] = (
 
 
 DEPENDENCY_FEATURES: tuple[tuple[tuple[str, ...], str, str, float], ...] = (
+    # 依赖名通常比自由文本更弱，但可以作为 RAG/Memory/MCP 等能力线索。
     (("langchain", "llama-index", "llama_index", "haystack"), "retriever_config", "rag", 0.78),
     (("chromadb", "faiss", "milvus", "qdrant", "weaviate"), "vector_index_config", "rag", 0.82),
     (("redis", "sqlite", "sqlalchemy", "duckdb"), "persistent_memory", "memory", 0.68),
@@ -47,6 +56,7 @@ DEPENDENCY_FEATURES: tuple[tuple[tuple[str, ...], str, str, float], ...] = (
 
 
 def analyze_static_artifact(text: str, source_hint: str = "") -> dict[str, Any]:
+    """从一个 artifact 文本中抽取 feature、capability、tool schema 和 api spec。"""
     structured = _parse_structured(text, source_hint)
     features: list[dict[str, Any]] = []
     capabilities: dict[str, bool] = {}
@@ -62,6 +72,7 @@ def analyze_static_artifact(text: str, source_hint: str = "") -> dict[str, Any]:
 
     if structured is not None:
         if isinstance(structured, dict):
+            # OpenAPI/MCP 有明确结构，优先用专门解析器生成工具 schema。
             _extract_openapi(structured, features, capabilities, tool_schemas, api_spec)
             _extract_mcp(structured, features, capabilities, tool_schemas)
         for path, key, value in _walk(structured):
@@ -91,6 +102,7 @@ def analyze_static_artifact(text: str, source_hint: str = "") -> dict[str, Any]:
 
 
 def _parse_structured(text: str, source_hint: str) -> Any:
+    """按扩展名和内容特征尝试解析 JSON/TOML/YAML。"""
     suffix = Path(source_hint).suffix.lower()
     stripped = text.strip()
     if suffix == ".json":
@@ -127,6 +139,7 @@ def _extract_openapi(
     tool_schemas: list[dict[str, Any]],
     api_spec: dict[str, Any],
 ) -> None:
+    """把 OpenAPI operation 映射成 AgentEVAL 的 tool_schemas。"""
     if "openapi" not in data and "swagger" not in data:
         return
     api_spec.update(data)
@@ -157,6 +170,7 @@ def _extract_mcp(
     capabilities: dict[str, bool],
     tool_schemas: list[dict[str, Any]],
 ) -> None:
+    """识别 MCP manifest/tools 列表，并补充 mcp/tool 能力证据。"""
     if not any(key.lower() in {"mcpservers", "tools", "server"} for key in data):
         return
     if "mcpServers" in data or data.get("protocol") == "mcp":
@@ -181,6 +195,7 @@ def _extract_mcp(
 
 
 def _extract_dependencies(text: str, structured: Any) -> list[str]:
+    """从 pyproject/requirements 等文件里收集依赖名。"""
     dependencies: list[str] = []
     if isinstance(structured, dict):
         project = structured.get("project") if isinstance(structured.get("project"), dict) else {}
@@ -202,6 +217,7 @@ def _extract_dependencies(text: str, structured: Any) -> list[str]:
 
 
 def _walk(value: Any, path: tuple[str, ...] = ()) -> list[tuple[tuple[str, ...], str, Any]]:
+    """展开嵌套结构，保留路径，便于关键词规则定位来源。"""
     items: list[tuple[tuple[str, ...], str, Any]] = []
     if isinstance(value, dict):
         for key, child in value.items():
@@ -214,6 +230,7 @@ def _walk(value: Any, path: tuple[str, ...] = ()) -> list[tuple[tuple[str, ...],
 
 
 def _looks_like_requirements(source_hint: str, text: str) -> bool:
+    """粗略识别 requirements 风格文本，避免普通段落被当依赖文件。"""
     lower = source_hint.lower()
     if "requirements" in lower or lower.endswith(".req"):
         return True
@@ -226,6 +243,7 @@ def _add_feature(features: list[dict[str, Any]], feature: str, value: Any, confi
 
 
 def _dedupe_features(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按 feature 和 value 摘要去重，保留不同来源/值的证据。"""
     seen: set[tuple[str, str]] = set()
     result: list[dict[str, Any]] = []
     for item in features:

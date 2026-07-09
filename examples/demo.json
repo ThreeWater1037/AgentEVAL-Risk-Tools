@@ -1,0 +1,12 @@
+{
+    "agents":[{
+      "agent_ref": "SimpleRAGChatbot",
+      "protocol": "mock",
+      "expected_domains": ["prompt_context_injection", "rag_poisoning"],
+      "static_artifacts": {
+        "policy": "standard assistant policy",
+        "capabilities": {"rag": true},
+        "rag": {"top_k": 5, "source": "local_knowledge_base", "external_write": true}
+      }
+    }]
+}

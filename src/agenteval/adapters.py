@@ -1,3 +1,9 @@
+"""目标清单到 AgentAccessDescriptor 的适配层。
+
+不同 registry/manifest 的字段名称不一定一致；这里先归一化成 TargetProfile，
+再转换成 Tool1 唯一理解的 AgentAccessDescriptor。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -10,6 +16,8 @@ from .structured import load_structured_file
 
 @dataclass(frozen=True)
 class TargetProfile:
+    """外部目标注册表的一条规范化记录。"""
+
     target_id: str
     name: str
     source: str = "unknown"
@@ -29,6 +37,7 @@ class TargetProfile:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], source_hint: str = "unknown") -> "TargetProfile":
+        """兼容 id/target_id、endpoint/base_url、布尔能力标签等常见写法。"""
         target_id = str(data.get("target_id") or data.get("id"))
         if not target_id:
             raise ValueError(f"target record from {source_hint} is missing target_id")
@@ -58,6 +67,7 @@ class TargetProfile:
         )
 
     def to_descriptor(self) -> AgentAccessDescriptor:
+        """把 profile 标签映射为 Tool1 能力线索和预期风险域。"""
         capabilities = {
             "rag": "rag" in self.tags,
             "memory": bool({"memory", "stateful"} & set(self.tags)),
@@ -100,16 +110,19 @@ class TargetProfile:
 
 
 def load_target_profiles(path: str | Path) -> list[TargetProfile]:
+    """读取结构化目标清单并归一化为 TargetProfile 列表。"""
     data = load_structured_file(path)
     records = _extract_target_records(data)
     return [TargetProfile.from_dict(record, source_hint=Path(path).name) for record in records]
 
 
 def load_target_descriptors(path: str | Path) -> list[AgentAccessDescriptor]:
+    """直接读取目标清单并转换为 Tool1 descriptors。"""
     return [profile.to_descriptor() for profile in load_target_profiles(path)]
 
 
 def _extract_target_records(data: Any) -> list[dict[str, Any]]:
+    """支持 targets/registry/agents/list/映射等多种清单形状。"""
     if isinstance(data, list):
         return [dict(item) for item in data]
     if not isinstance(data, dict):
@@ -143,6 +156,7 @@ def _as_list(value: Any) -> list[Any]:
 
 
 def _expected_domains_from_tags(tags: tuple[str, ...], target_type: str) -> list[str]:
+    """用标签推导评估用 expected_domains，只作为代理标签来源。"""
     tag_set = set(tags)
     domains = ["prompt_context_injection"] if tag_set & {"chat", "prompt", "llm_endpoint"} else []
     if "rag" in tag_set:
