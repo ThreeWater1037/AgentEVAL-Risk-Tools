@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 import importlib.util
 import inspect
+import os
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -136,12 +138,16 @@ class HttpAgentConnector(DirectAgentConnector):
     def handshake(self) -> dict[str, Any]:
         if not self.descriptor.endpoint:
             return {"ok": False, "protocol": "http", "error": "missing endpoint"}
+        auth_error = self._auth_error()
+        if auth_error:
+            return {"ok": False, "protocol": "http", "error": auth_error}
         inspect_path = self.descriptor.inspect.get("healthcheck") or self.descriptor.inspect.get("path")
         if not inspect_path:
             return {"ok": True, "protocol": "http", "endpoint": self.descriptor.endpoint}
         url = _join_url(self.descriptor.endpoint, str(inspect_path))
         try:
-            with urllib.request.urlopen(url, timeout=self.descriptor.timeout_s) as resp:
+            request = urllib.request.Request(url, headers=self._headers(), method="GET")
+            with urllib.request.urlopen(request, timeout=self.descriptor.timeout_s) as resp:
                 return {"ok": 200 <= resp.status < 500, "protocol": "http", "status": resp.status, "healthcheck": url}
         except urllib.error.URLError as exc:
             return {"ok": False, "protocol": "http", "error": str(exc), "healthcheck": url}
@@ -149,13 +155,16 @@ class HttpAgentConnector(DirectAgentConnector):
     def send(self, prompt: str) -> ConnectorResponse:
         if not self.descriptor.endpoint:
             return ConnectorResponse(False, "missing endpoint")
+        auth_error = self._auth_error()
+        if auth_error:
+            return ConnectorResponse(False, auth_error, raw={"error": auth_error})
 
         # request_template 只替换 prompt 占位符，不在这里推断业务字段语义。
         payload = _fill_template(self.descriptor.request_template, prompt)
         request = urllib.request.Request(
             self.descriptor.endpoint,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=self._headers(),
             method=self.descriptor.method.upper(),
         )
         try:
@@ -171,16 +180,22 @@ class HttpAgentConnector(DirectAgentConnector):
             parsed = {"text": body}
 
         content = _lookup_response(parsed, self.descriptor.response_key)
-        return ConnectorResponse(ok=True, content=content, raw=parsed)
+        return ConnectorResponse(ok=True, content=content, raw=parsed, events=_events_from_structured_response(parsed))
 
     def inspect(self) -> dict[str, Any]:
         """读取远端 OpenAPI/schema 后与 descriptor 中的静态信息合并。"""
         path = self.descriptor.inspect.get("schema_path") or self.descriptor.inspect.get("openapi_path")
         if not path or not self.descriptor.endpoint:
             return dict(self.descriptor.static_artifacts)
+        auth_error = self._auth_error()
+        if auth_error:
+            data = dict(self.descriptor.static_artifacts)
+            data["inspect_error"] = auth_error
+            return data
         url = _join_url(self.descriptor.endpoint, str(path))
         try:
-            with urllib.request.urlopen(url, timeout=self.descriptor.timeout_s) as resp:
+            request = urllib.request.Request(url, headers=self._headers(), method="GET")
+            with urllib.request.urlopen(request, timeout=self.descriptor.timeout_s) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
         except urllib.error.URLError as exc:
             data = dict(self.descriptor.static_artifacts)
@@ -194,6 +209,20 @@ class HttpAgentConnector(DirectAgentConnector):
         else:
             data["inspect_text"] = str(parsed)
         return data
+
+    def _auth_error(self) -> str:
+        if self.descriptor.auth_ref and not os.environ.get(self.descriptor.auth_ref):
+            return f"missing auth environment variable: {self.descriptor.auth_ref}"
+        return ""
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        headers.update({str(key): str(value) for key, value in self.descriptor.headers.items()})
+        if self.descriptor.auth_ref:
+            secret = os.environ.get(self.descriptor.auth_ref, "")
+            scheme = self.descriptor.auth_scheme.strip()
+            headers[self.descriptor.auth_header] = f"{scheme} {secret}" if scheme else secret
+        return headers
 
 
 class PythonFunctionConnector(DirectAgentConnector):
@@ -351,7 +380,7 @@ def _parse_json_or_text(raw: str) -> Any:
 def _join_url(endpoint: str, path: str) -> str:
     if path.startswith("http://") or path.startswith("https://"):
         return path
-    return endpoint.rstrip("/") + "/" + path.lstrip("/")
+    return urllib.parse.urljoin(endpoint.rstrip("/") + "/", path)
 
 
 def _events_from_structured_response(parsed: dict[str, Any]) -> list[ConnectorEvent]:

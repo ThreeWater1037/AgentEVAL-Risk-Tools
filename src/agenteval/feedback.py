@@ -52,7 +52,9 @@ def apply_feedback_to_analysis(analysis_dir: str | Path) -> dict[str, Any]:
         seed_results = by_seed.get(seed.seed_id, [])
         if not seed_results:
             continue
-        before = seed.confidence
+        # 重复提交或修正同一批结果时，从首次反馈前的基线重算，保证接口幂等。
+        previous_feedback = seed.score_detail.get("feedback", {})
+        before = float(previous_feedback.get("confidence_before", seed.confidence))
         stages = Counter(str(item.get("failure_stage", "unknown")) for item in seed_results)
         # stage 调整反映触发轨迹，quality 调整反映 Tool2 case 自身质量。
         stage_adjustment = sum(STAGE_ADJUSTMENTS.get(stage, -0.01) * count for stage, count in stages.items()) / max(1, len(seed_results))

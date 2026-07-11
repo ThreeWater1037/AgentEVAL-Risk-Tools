@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .io import load_json, write_json
-from .schemas import GeneratedCase, RunResult
+from .schemas import FAILURE_STAGES, ExecutionContext, GeneratedCase, RunResult
 
 
 class CaseExecutor(ABC):
@@ -24,6 +24,10 @@ class CaseExecutor(ABC):
     @abstractmethod
     def run(self, analysis_id: str, cases: list[GeneratedCase]) -> list[RunResult]:
         raise NotImplementedError
+
+    def run_with_context(self, context: ExecutionContext, cases: list[GeneratedCase]) -> list[RunResult]:
+        """新版上下文入口；旧执行器无需修改即可继续按 analysis_id 运行。"""
+        return self.run(context.analysis_id, cases)
 
 
 class SandboxExecutor(CaseExecutor):
@@ -103,23 +107,64 @@ class ExecutorRegistry:
     def names(self) -> set[str]:
         return set(self._executors)
 
-    def run(self, analysis_id: str, cases: list[GeneratedCase]) -> list[RunResult]:
-        """按 case.executor 分发执行，缺失时使用 fallback。"""
+    def run(
+        self,
+        context: str | ExecutionContext,
+        cases: list[GeneratedCase],
+        *,
+        allow_fallback: bool = True,
+    ) -> list[RunResult]:
+        """按 executor 分组执行；严格模式下未知执行器直接失败。"""
+        analysis_id = context.analysis_id if isinstance(context, ExecutionContext) else context
         print(f"【执行器注册表】开始执行：analysis_id={analysis_id}，case数量={len(cases)}")
-        results: list[RunResult] = []
+        selected: dict[str, tuple[CaseExecutor, list[GeneratedCase], bool]] = {}
         for case in cases:
             requested = case.executor or "sandbox"
+            missing = requested not in self._executors
+            if missing and not allow_fallback:
+                raise ValueError(f"executor not registered: {requested}")
             executor = self._executors.get(requested, self.fallback)
-            result = executor.run(analysis_id, [case])[0]
-            result.feedback.setdefault("requested_executor", requested)
-            result.feedback.setdefault("selected_executor", executor.name)
-            if executor is self.fallback and requested not in self._executors:
-                result.feedback.setdefault("fallback_reason", "executor_not_registered")
-            results.append(result)
+            group_key = f"{requested}|{id(executor)}"
+            if group_key not in selected:
+                selected[group_key] = (executor, [], missing)
+            selected[group_key][1].append(case)
+
+        result_by_case: dict[str, RunResult] = {}
+        for group_key, (executor, grouped_cases, used_fallback) in selected.items():
+            requested = group_key.split("|", 1)[0]
+            if isinstance(context, ExecutionContext):
+                grouped_results = executor.run_with_context(context, grouped_cases)
+            else:
+                grouped_results = executor.run(analysis_id, grouped_cases)
+            self._validate_results(analysis_id, grouped_cases, grouped_results)
+            for result in grouped_results:
+                result.feedback.setdefault("requested_executor", requested)
+                result.feedback.setdefault("selected_executor", executor.name)
+                if used_fallback:
+                    result.feedback.setdefault("fallback_reason", "executor_not_registered")
+                result_by_case[result.case_id] = result
+
+        results = [result_by_case[case.case_id] for case in cases]
         stages = Counter(result.failure_stage for result in results)
         fallback_count = sum(1 for result in results if result.feedback.get("fallback_reason"))
         print(f"【执行器注册表】执行完成：结果数={len(results)}，阶段分布={dict(stages)}，回退次数={fallback_count}")
         return results
+
+    @staticmethod
+    def _validate_results(analysis_id: str, cases: list[GeneratedCase], results: list[RunResult]) -> None:
+        """拒绝空、重复或错配结果，避免下游悄悄丢 case。"""
+        expected = {case.case_id: case for case in cases}
+        actual_ids = [result.case_id for result in results]
+        if len(results) != len(cases) or len(set(actual_ids)) != len(actual_ids) or set(actual_ids) != set(expected):
+            raise ValueError("executor results must contain exactly one record for every input case")
+        for result in results:
+            case = expected[result.case_id]
+            if result.analysis_id != analysis_id:
+                raise ValueError(f"executor result analysis_id mismatch: {result.case_id}")
+            if result.seed_id != case.seed_id:
+                raise ValueError(f"executor result seed_id mismatch: {result.case_id}")
+            if result.failure_stage not in FAILURE_STAGES:
+                raise ValueError(f"executor result failure_stage is unsupported: {result.case_id}")
 
 
 DEFAULT_EXECUTOR_REGISTRY = ExecutorRegistry()

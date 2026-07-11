@@ -4,6 +4,9 @@ __pycache__/
 *.pyo
 *.pyd
 *.egg-info/
+build/
+dist/
+*.whl
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

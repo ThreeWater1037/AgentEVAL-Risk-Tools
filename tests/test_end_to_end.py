@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import shutil
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ class EndToEndTest(unittest.TestCase):
         base.mkdir(exist_ok=True)
         path = base / f"test_{uuid.uuid4().hex}"
         path.mkdir()
+        self.addCleanup(shutil.rmtree, path, True)
         return path
 
     def test_rag_descriptor_generates_seed_and_cases(self) -> None:

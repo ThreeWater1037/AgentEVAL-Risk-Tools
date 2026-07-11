@@ -34,11 +34,17 @@ SUCCESS_STAGES = {"attack_success"}
 class Tool2Generator:
     """从 Tool1 的 RiskSeed 生成、校验并可迭代 refined GeneratedCase。"""
 
-    def __init__(self, generator_version: str = "tool2-0.1", enable_llm_variants: bool | None = None):
+    def __init__(
+        self,
+        generator_version: str = "tool2-0.1",
+        enable_llm_variants: bool | None = None,
+        available_executors: set[str] | None = None,
+    ):
         """enable_llm_variants=None 时按 API key 自动启用。"""
         self.generator_version = generator_version
         self.llm_client = DeepSeekJSONClient()
         self.enable_llm_variants = self.llm_client.available if enable_llm_variants is None else enable_llm_variants
+        self.available_executors = available_executors
 
     def generate(
         self,
@@ -416,12 +422,11 @@ class Tool2Generator:
             **dry_run,
         }
 
-    @staticmethod
-    def _dry_run_validate(payload: dict[str, Any], snapshot: AgentSnapshot, seed: RiskSeed) -> dict[str, Any]:
+    def _dry_run_validate(self, payload: dict[str, Any], snapshot: AgentSnapshot, seed: RiskSeed) -> dict[str, Any]:
         """不触达真实目标，只检查执行器可用性、字段类型和上下文绑定。"""
         errors: list[str] = []
         warnings: list[str] = []
-        registered = registered_executor_names()
+        registered = self.available_executors if self.available_executors is not None else registered_executor_names()
         executor_available = seed.recommended_executor in registered
         sandbox_fallback_available = bool(registered & {"sandbox", "deterministic_sandbox"})
         if not executor_available and sandbox_fallback_available:

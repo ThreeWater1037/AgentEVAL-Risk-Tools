@@ -3,10 +3,22 @@ services:
     build: .
     image: agenteval-risk-tools:latest
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
-      PYTHONPATH: /app/src
+      AGENTEVAL_API_TOKEN: ${AGENTEVAL_API_TOKEN:-}
+      AGENTEVAL_ALLOW_LOCAL_EXECUTION: ${AGENTEVAL_ALLOW_LOCAL_EXECUTION:-0}
+      AGENTEVAL_ALLOW_TARGET_AUTH: ${AGENTEVAL_ALLOW_TARGET_AUTH:-0}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_TIMEOUT_S: ${DEEPSEEK_TIMEOUT_S:-60}
+      DEEPSEEK_MAX_TOKENS: ${DEEPSEEK_MAX_TOKENS:-2048}
+      DEEPSEEK_TEMPERATURE: ${DEEPSEEK_TEMPERATURE:-0.1}
     volumes:
       - ./runs:/app/runs
-    command: ["uvicorn", "agenteval.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s

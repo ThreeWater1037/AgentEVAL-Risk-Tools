@@ -10,11 +10,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from .adapters import load_target_descriptors
+from .adapters import load_agent_descriptors, load_target_descriptors
 from .evaluation import evaluate_tool12, import_paper_results, load_label_file
-from .experiment import DEFAULT_EXECUTOR_REGISTRY, summarize_run_root
+from .experiment import SandboxExecutor, summarize_run_root
 from .feedback import apply_feedback_to_analysis
 from .io import ensure_dir, load_json, write_json
+from .pipeline import AgentEval, PipelineOptions
 from .report import write_run_markdown
 from .schemas import AgentAccessDescriptor, AgentSnapshot, GeneratedCase, RiskSeed
 from .tool1 import Tool1Analyzer
@@ -25,6 +26,29 @@ def main(argv: list[str] | None = None) -> int:
     """注册所有子命令并分发到对应处理函数。"""
     parser = argparse.ArgumentParser(prog="agenteval")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    # 正式主入口：默认只准备执行包，不把 sandbox 代理结果冒充真实结果。
+    run = sub.add_parser("run", help="Analyze one Agent and prepare cases for a downstream executor.")
+    run.add_argument("--input", "--target", "--descriptor", dest="input", required=True)
+    run.add_argument("--select", help="Select agent_ref when the input contains multiple Agents.")
+    run.add_argument("--out", required=True)
+    run.add_argument("--count", type=int, default=1, help="Cases generated per eligible risk seed.")
+    run.add_argument("--profile", choices=["compact", "expanded"], default="compact")
+    run.add_argument("--llm", choices=["off", "auto", "on"], default="off")
+    run.add_argument("--no-dynamic-probe", action="store_true")
+    run.add_argument("--execute-sandbox", action="store_true", help="Explicitly run the deterministic proxy sandbox.")
+    run.add_argument("--apply-feedback", action="store_true", help="Apply sandbox results back to risk seeds.")
+    _add_case_prompt_flags(run)
+
+    import_results = sub.add_parser("import-results", help="Validate and import downstream executor results.")
+    import_results.add_argument("--analysis-dir", required=True)
+    import_results.add_argument("--results", required=True)
+    import_results.add_argument("--no-feedback", action="store_true")
+
+    serve = sub.add_parser("serve", help="Start the versioned AgentEVAL HTTP API.")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--run-root", default="runs/api_sessions")
 
     # 单步 Tool1：从 descriptor 发现 evidence/snapshot/risk_seeds。
     analyze = sub.add_parser("analyze-agent", help="Run Tool1 against a descriptor.")
@@ -107,6 +131,12 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--out", required=True)
 
     args = parser.parse_args(argv)
+    if args.command == "run":
+        return _cmd_run(args)
+    if args.command == "import-results":
+        return _cmd_import_results(args)
+    if args.command == "serve":
+        return _cmd_serve(args)
     if args.command == "analyze-agent":
         return _cmd_analyze(args)
     if args.command == "generate-cases":
@@ -135,6 +165,66 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     parser.error(f"unknown command: {args.command}")
     return 2
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    """正式一键入口：完成 Tool1/Tool2，并把 cases 交付给下游。"""
+    if args.apply_feedback and not args.execute_sandbox:
+        raise SystemExit("--apply-feedback requires --execute-sandbox")
+    print(f"【CLI】开始准备评估：input={args.input}，输出目录={args.out}，llm={args.llm}")
+    service = AgentEval()
+    evaluation = service.prepare(
+        args.input,
+        out_dir=args.out,
+        agent_ref=args.select,
+        options=PipelineOptions(
+            count=args.count,
+            profile=args.profile,
+            dynamic_probe=not args.no_dynamic_probe,
+            llm={"off": False, "auto": None, "on": True}[args.llm],
+            use_siraj_prompts=args.siraj_prompts,
+        ),
+    )
+    if args.execute_sandbox:
+        results = service.execute_sandbox(
+            evaluation,
+            apply_feedback=args.apply_feedback,
+        )
+        print(f"【CLI】代理sandbox完成：results={len(results)}；该结果不是真实ASR")
+    summary = evaluation.summary()
+    print(
+        "【CLI】评估包已准备完成："
+        f"evaluation_id={summary['evaluation_id']}，seeds={summary['seed_count']}，"
+        f"cases={summary['case_count']}，bundle={summary['execution_bundle_path']}"
+    )
+    return 0
+
+
+def _cmd_import_results(args: argparse.Namespace) -> int:
+    """导入独立下游执行器回传的最小结果 JSON。"""
+    summary = AgentEval().submit_results(
+        args.analysis_dir,
+        args.results,
+        apply_feedback=not args.no_feedback,
+    )
+    print(
+        f"【CLI】下游结果已接收：evaluation_id={summary['evaluation_id']}，"
+        f"accepted={summary['accepted']}，status={summary['status']}"
+    )
+    return 0
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """启动 API；本地 Python/runner 目标默认被 API 禁用。"""
+    try:
+        import uvicorn
+    except ModuleNotFoundError as exc:
+        raise SystemExit('API dependencies are missing; install with: pip install ".[api]"') from exc
+    from .api import create_app
+
+    print(f"【API】启动服务：http://{args.host}:{args.port}，run_root={args.run_root}")
+    uvicorn.run(create_app(args.run_root), host=args.host, port=args.port)
+    return 0
 
 
 def _cmd_analyze(args: argparse.Namespace) -> int:
@@ -181,7 +271,7 @@ def _cmd_run_cases(args: argparse.Namespace) -> int:
     print(f"【CLI】开始执行测试用例：analysis_dir={analysis_dir}")
     snapshot = AgentSnapshot.from_dict(load_json(analysis_dir / "agent_snapshot.json"))
     cases = [GeneratedCase.from_dict(item) for item in load_json(analysis_dir / "generated_cases.json")]
-    results = DEFAULT_EXECUTOR_REGISTRY.run(snapshot.analysis_id, cases)
+    results = SandboxExecutor().run(snapshot.analysis_id, cases)
     write_json(analysis_dir / "run_result.json", results)
     print(f"【执行器】完成测试用例执行：results={len(results)}，输出={analysis_dir / 'run_result.json'}")
     return 0
@@ -290,7 +380,7 @@ def _run_descriptor_flow(
         print(f"【Tool1】完成：{field_label}={descriptor.agent_ref}，seeds={len(seeds)}，evidence={len(snapshot.evidence_index)}")
         cases = generator.generate(snapshot, seeds, count=args.count, out_dir=agent_dir, profile=args.profile, use_siraj_prompts=args.siraj_prompts)
         print(f"【Tool2】完成：{field_label}={descriptor.agent_ref}，cases={len(cases)}")
-        results = DEFAULT_EXECUTOR_REGISTRY.run(session.analysis_id, cases)
+        results = SandboxExecutor().run(session.analysis_id, cases)
         write_json(agent_dir / "run_result.json", results)
         print(f"【执行器】完成：{field_label}={descriptor.agent_ref}，results={len(results)}")
         per_agent_expected.append(_expected_eval_row(descriptor, seeds))
@@ -318,15 +408,8 @@ def _expected_eval_row(descriptor: AgentAccessDescriptor, seeds: list[RiskSeed])
 
 
 def _load_descriptors(path: str | Path) -> list[AgentAccessDescriptor]:
-    """兼容单 descriptor、agents 列表和裸列表三种 JSON 形状。"""
-    data = load_json(path)
-    if isinstance(data, dict) and "agents" in data:
-        items = data["agents"]
-    elif isinstance(data, dict) and "agent_ref" in data:
-        items = [data]
-    else:
-        items = data
-    return [AgentAccessDescriptor.from_dict(item) for item in items]
+    """统一复用 descriptor/manifest 加载器。"""
+    return load_agent_descriptors(path)
 
 
 def _add_llm_review_flags(parser: argparse.ArgumentParser) -> None:

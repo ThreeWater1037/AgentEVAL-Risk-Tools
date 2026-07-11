@@ -38,9 +38,10 @@ class TargetProfile:
     @classmethod
     def from_dict(cls, data: dict[str, Any], source_hint: str = "unknown") -> "TargetProfile":
         """兼容 id/target_id、endpoint/base_url、布尔能力标签等常见写法。"""
-        target_id = str(data.get("target_id") or data.get("id"))
-        if not target_id:
+        raw_target_id = data.get("target_id") or data.get("id") or data.get("agent_ref")
+        if not raw_target_id:
             raise ValueError(f"target record from {source_hint} is missing target_id")
+        target_id = str(raw_target_id)
         tags = sorted({str(tag).strip().lower() for tag in _as_list(data.get("tags")) if str(tag).strip()})
         metadata = dict(data.get("metadata") or {})
         metadata.setdefault("profile_source", source_hint)
@@ -117,8 +118,26 @@ def load_target_profiles(path: str | Path) -> list[TargetProfile]:
 
 
 def load_target_descriptors(path: str | Path) -> list[AgentAccessDescriptor]:
-    """直接读取目标清单并转换为 Tool1 descriptors。"""
-    return [profile.to_descriptor() for profile in load_target_profiles(path)]
+    """兼容旧名称；descriptor 与 target manifest 现在走同一个加载入口。"""
+    return load_agent_descriptors(path)
+
+
+def load_agent_descriptors(path: str | Path) -> list[AgentAccessDescriptor]:
+    """统一读取单 descriptor、agents 列表或 target manifest。
+
+    已经包含 ``agent_ref/protocol`` 的记录直接保留完整连接配置；只有 registry
+    风格记录才先经过 TargetProfile，避免过去 run-demo/run-manifest 两套格式漂移。
+    """
+    data = load_structured_file(path)
+    records = _extract_target_records(data)
+    source_hint = Path(path).name
+    descriptors: list[AgentAccessDescriptor] = []
+    for record in records:
+        if _looks_like_descriptor(record):
+            descriptors.append(AgentAccessDescriptor.from_dict(record))
+        else:
+            descriptors.append(TargetProfile.from_dict(record, source_hint=source_hint).to_descriptor())
+    return descriptors
 
 
 def _extract_target_records(data: Any) -> list[dict[str, Any]]:
@@ -134,9 +153,23 @@ def _extract_target_records(data: Any) -> list[dict[str, Any]]:
                 return [dict(item) for item in value]
             if isinstance(value, dict):
                 return [_record_from_mapping(target_id, record) for target_id, record in value.items()]
-    if "target_id" in data or "id" in data:
+    if "target_id" in data or "id" in data or "agent_ref" in data or ("name" in data and "url" in data):
         return [dict(data)]
     return [_record_from_mapping(target_id, record) for target_id, record in data.items()]
+
+
+def _looks_like_descriptor(record: dict[str, Any]) -> bool:
+    descriptor_keys = {
+        "agent_ref",
+        "protocol",
+        "request_template",
+        "python_callable",
+        "runner",
+        "static_artifacts",
+        "optional_artifacts",
+        "url",
+    }
+    return bool(descriptor_keys & set(record))
 
 
 def _record_from_mapping(target_id: str, record: Any) -> dict[str, Any]:

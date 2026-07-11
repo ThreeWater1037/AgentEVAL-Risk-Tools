@@ -3,7 +3,7 @@
   "protocol": "python",
   "request_template": {"message": "{{prompt}}"},
   "python_callable": {
-    "module_path": "tests/fixtures/fake_direct_agent.py",
+    "module_path": "examples/fake_direct_agent.py",
     "callable": "handle",
     "inspect": "inspect_agent"
   },

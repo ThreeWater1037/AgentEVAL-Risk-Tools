@@ -13,6 +13,17 @@ from typing import Any
 
 
 JsonDict = dict[str, Any]
+FAILURE_STAGES = frozenset(
+    {
+        "attack_success",
+        "action_blocked",
+        "retrieved_not_adopted",
+        "adopted_no_action",
+        "require_review",
+        "not_triggered",
+        "setup_failed",
+    }
+)
 
 
 def utc_now_iso() -> str:
@@ -51,18 +62,32 @@ class AgentAccessDescriptor:
     timeout_s: float = 30.0
     static_artifacts: JsonDict = field(default_factory=dict)
     expected_domains: list[str] = field(default_factory=list)
+    headers: JsonDict = field(default_factory=dict)
+    auth_header: str = "Authorization"
+    auth_scheme: str = "Bearer"
+    defense_config: JsonDict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: JsonDict) -> "AgentAccessDescriptor":
         """兼容不同清单字段名，把用户/注册表输入规范化成描述符。"""
+        agent_ref = data.get("agent_ref") or data.get("target_id") or data.get("id") or data.get("name")
+        if not agent_ref:
+            raise ValueError("agent descriptor requires agent_ref, target_id, id, or name")
+        auth = data.get("auth") if isinstance(data.get("auth"), dict) else {}
+        protocol = data.get("protocol")
+        if not protocol:
+            protocol = "http" if data.get("endpoint") or data.get("url") else "python" if data.get("python_callable") else "runner" if data.get("runner") else "mock"
+        request_template = data.get("request_template")
+        if request_template is None:
+            request_template = {str(data.get("input_key", "message")): "{{prompt}}"}
         return cls(
-            agent_ref=str(data["agent_ref"]),
-            protocol=str(data.get("protocol", "mock")),
-            endpoint=data.get("endpoint"),
+            agent_ref=str(agent_ref),
+            protocol=str(protocol),
+            endpoint=data.get("endpoint") or data.get("url"),
             method=str(data.get("method", "POST")),
-            request_template=dict(data.get("request_template", {"message": "{{prompt}}"})),
+            request_template=dict(request_template),
             response_key=data.get("response_key") or data.get("output_key"),
-            auth_ref=data.get("auth_ref"),
+            auth_ref=data.get("auth_ref") or auth.get("env"),
             runner=data.get("runner"),
             python_callable=dict(data.get("python_callable") or {}),
             inspect=dict(data.get("inspect") or {}),
@@ -72,6 +97,10 @@ class AgentAccessDescriptor:
             timeout_s=float(data.get("timeout_s", data.get("timeout", 30.0))),
             static_artifacts=dict(data.get("static_artifacts", {})),
             expected_domains=list(data.get("expected_domains", [])),
+            headers=dict(data.get("headers") or {}),
+            auth_header=str(data.get("auth_header") or auth.get("header") or "Authorization"),
+            auth_scheme=str(data.get("auth_scheme") if data.get("auth_scheme") is not None else auth.get("scheme", "Bearer")),
+            defense_config=dict(data.get("defense_config") or data.get("defense") or {}),
         )
 
 
@@ -161,6 +190,16 @@ class AnalysisSession:
     started_at: str = field(default_factory=utc_now_iso)
     sandbox_policy: JsonDict = field(default_factory=lambda: {"mode": "safe_probe_only"})
 
+    @classmethod
+    def from_dict(cls, data: JsonDict) -> "AnalysisSession":
+        return cls(
+            analysis_id=str(data["analysis_id"]),
+            agent_access=AgentAccessDescriptor.from_dict(dict(data["agent_access"])),
+            connector_type=str(data.get("connector_type", data.get("agent_access", {}).get("protocol", "mock"))),
+            started_at=str(data.get("started_at", utc_now_iso())),
+            sandbox_policy=dict(data.get("sandbox_policy") or {"mode": "safe_probe_only"}),
+        )
+
 
 @dataclass
 class RiskSeed:
@@ -243,6 +282,30 @@ class RunResult:
     failure_stage: str
     metrics: JsonDict
     feedback: JsonDict = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: JsonDict) -> "RunResult":
+        return cls(
+            run_id=str(data["run_id"]),
+            analysis_id=str(data["analysis_id"]),
+            seed_id=str(data["seed_id"]),
+            case_id=str(data["case_id"]),
+            failure_stage=str(data["failure_stage"]),
+            metrics=dict(data.get("metrics") or {}),
+            feedback=dict(data.get("feedback") or {}),
+        )
+
+
+@dataclass
+class ExecutionContext:
+    """真实执行器所需的稳定上下文；密钥只通过 auth_ref 引用，不写入产物。"""
+
+    analysis_id: str
+    analysis_dir: str
+    agent_access: AgentAccessDescriptor
+    snapshot: AgentSnapshot
+    sandbox_policy: JsonDict = field(default_factory=dict)
+    defense_config: JsonDict = field(default_factory=dict)
 
 
 def _normalize_artifacts(value: Any) -> list[JsonDict]:

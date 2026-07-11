@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import uuid
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -56,6 +57,7 @@ class Tool1Analyzer:
         enable_llm_evidence: bool | None = None,
         enable_llm_runtime_events: bool | None = None,
         enable_siraj_enrichment: bool = True,
+        enable_llm_siraj_enrichment: bool | None = None,
     ):
         """配置动态 probe 与可选 LLM 阶段；None 表示按 API key 自动启用。"""
         self.enable_dynamic_probe = enable_dynamic_probe
@@ -64,6 +66,7 @@ class Tool1Analyzer:
         self.enable_llm_evidence = self.llm_client.available if enable_llm_evidence is None else enable_llm_evidence
         self.enable_llm_runtime_events = self.llm_client.available if enable_llm_runtime_events is None else enable_llm_runtime_events
         self.enable_siraj_enrichment = enable_siraj_enrichment
+        self.enable_llm_siraj_enrichment = enable_llm_siraj_enrichment
 
     def analyze(self, descriptor: AgentAccessDescriptor, out_dir: str | Path | None = None) -> tuple[AnalysisSession, AgentSnapshot, list[RiskSeed]]:
         """完整 Tool1 流程：探活、收集证据、生成 seed，并按需写出结果。"""
@@ -78,7 +81,8 @@ class Tool1Analyzer:
             f"llm_evidence={self.enable_llm_evidence}，"
             f"llm_runtime_events={self.enable_llm_runtime_events}，"
             f"llm_review={self.enable_llm_review}，"
-            f"siraj_enrichment={self.enable_siraj_enrichment}"
+            f"siraj_enrichment={self.enable_siraj_enrichment}，"
+            f"llm_siraj_enrichment={self.enable_llm_siraj_enrichment}"
         )
         connector = create_connector(descriptor)
         print(f"【Tool1】连接器创建完成：connector={connector.__class__.__name__}")
@@ -86,6 +90,7 @@ class Tool1Analyzer:
             analysis_id=analysis_id,
             agent_access=descriptor,
             connector_type=descriptor.protocol,
+            sandbox_policy=dict(descriptor.sandbox_policy or {"mode": "safe_probe_only"}),
         )
         evidence: list[EvidenceItem] = []
         runtime_observations: list[dict] = []
@@ -132,10 +137,12 @@ class Tool1Analyzer:
         if self.enable_dynamic_probe:
             connector.reset()
             probe_prompts = self._probe_prompts()
+            successful_probes = 0
             print(f"【Tool1】开始动态良性probe：probe_count={len(probe_prompts)}")
             for probe_index, prompt in enumerate(probe_prompts, start=1):
                 probe_before = len(evidence)
                 response = connector.send(prompt)
+                successful_probes += int(response.ok)
                 runtime_events, runtime_event_meta = self._runtime_events_with_llm(prompt, response)
                 runtime_observations.append(
                     {
@@ -154,17 +161,18 @@ class Tool1Analyzer:
                     f"llm_runtime={_compact_dict(runtime_event_meta)}，"
                     f"新增evidence={len(evidence) - probe_before}"
                 )
-            evidence.append(
-                self._evidence(
-                    analysis_id,
-                    "runtime_probe",
-                    "baseline",
-                    "baseline_response",
-                    True,
-                    0.85,
-                    "Connector returned a baseline response during benign probes.",
+            if successful_probes:
+                evidence.append(
+                    self._evidence(
+                        analysis_id,
+                        "runtime_probe",
+                        "baseline",
+                        "baseline_response",
+                        True,
+                        0.85,
+                        "Connector returned a baseline response during benign probes.",
+                    )
                 )
-            )
             print(f"【Tool1】动态probe完成：累计runtime_observations={len(runtime_observations)}，累计evidence={len(evidence)}")
         else:
             print("【Tool1】动态良性probe已跳过：enable_dynamic_probe=False")
@@ -748,7 +756,7 @@ class Tool1Analyzer:
 
         enrichments: dict[str, dict] = {}
         llm_error = ""
-        if self.llm_client.available:
+        if self.enable_llm_siraj_enrichment is not False and self.llm_client.available:
             try:
                 result = self.llm_client.complete_json(
                     self._siraj_enrichment_system_prompt(),
@@ -871,9 +879,9 @@ class Tool1Analyzer:
 
     @staticmethod
     def _analysis_id(agent_ref: str) -> str:
-        """用 agent_ref 加当前时间生成人可读且低碰撞的分析 ID。"""
+        """用 agent_ref 加随机后缀生成人可读且低碰撞的分析 ID。"""
         clean = "".join(ch.lower() if ch.isalnum() else "_" for ch in agent_ref).strip("_")[:32]
-        digest = hashlib.sha1(f"{agent_ref}|{utc_now_iso()}".encode("utf-8")).hexdigest()[:8]
+        digest = uuid.uuid4().hex[:8]
         return f"analysis_{clean}_{digest}"
 
 

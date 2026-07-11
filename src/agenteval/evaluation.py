@@ -17,7 +17,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
-from .experiment import DEFAULT_EXECUTOR_REGISTRY
+from .experiment import SandboxExecutor
 from .feedback import apply_feedback_to_analysis
 from .io import ensure_dir, load_json, write_json
 from .llm import DeepSeekJSONClient, LLMUnavailable, truncate_text
@@ -127,7 +127,7 @@ def evaluate_tool12(
         )
         print(f"【Tool2】完成测试用例生成：agent={descriptor.agent_ref}，cases={len(cases)}")
         print(f"【执行器】开始执行测试用例：agent={descriptor.agent_ref}，cases={len(cases)}")
-        results = DEFAULT_EXECUTOR_REGISTRY.run(session.analysis_id, cases)
+        results = SandboxExecutor().run(session.analysis_id, cases)
         write_json(agent_dir / "run_result.json", results)
         print(f"【执行器】完成测试用例执行：agent={descriptor.agent_ref}，results={len(results)}")
         # 执行反馈会回写 risk_seeds.json，因此后面重新读取更新后的 seed。
@@ -618,7 +618,7 @@ def _evaluate_ablations(
             use_siraj_prompts=scenario.siraj_prompts,
         )
         if scenario.feedback:
-            results = DEFAULT_EXECUTOR_REGISTRY.run(session.analysis_id, cases)
+            results = SandboxExecutor().run(session.analysis_id, cases)
             write_json(agent_dir / "run_result.json", results)
             apply_feedback_to_analysis(agent_dir)
             seeds = [RiskSeed.from_dict(item) for item in load_json(agent_dir / "risk_seeds.json")]
