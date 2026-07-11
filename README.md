@@ -1,6 +1,6 @@
 # AgentEVAL
 
-AgentEVAL 是比赛项目的上游安全评测编排器：输入待测 Agent 的访问说明，由 Tool1 发现有证据支撑的候选攻击面，再由 Tool2 生成结构化测试用例，最后把统一的 `execution_bundle.json` 交给下游攻击器执行。
+AgentEVAL 是一个上游安全评测编排器：输入待测 Agent 的访问说明，由 Tool1 发现有证据支撑的候选攻击面，再由 Tool2 生成结构化测试用例，最后把统一的 `execution_bundle.json` 交给下游攻击器执行。
 
 ```text
 Agent 描述 -> Tool1 -> Risk Seed -> Tool2 -> Case -> 下游执行器 -> Result
